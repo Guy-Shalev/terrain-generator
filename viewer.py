@@ -19,7 +19,7 @@ def _map_height(width):
 
 HELP = [
     "left drag / arrows / WASD   pan",
-    "sliders (top right)         plate count, world size",
+    "sliders (top right)         plates, world size, margin fray",
     "wheel / + -                 zoom      (Z resets)",
     "1..9, 0, -                  layer     ([ ] cycles all)",
     "R                           regenerate, new seed",
@@ -91,6 +91,9 @@ class Viewer:
             Slider("plates", 4, 48, cfg.n_plates),
             Slider("map size", 192, 1024, cfg.width, step=64,
                    fmt=lambda v: f"{v}x{_map_height(v)}"),
+            # Sliders are integer, so this one carries hundredths.
+            Slider("margin fray", 0, 40, round(cfg.margin_h * 100),
+                   fmt=lambda v: f"{v / 100:.2f}"),
         ]
         self.regenerate(cfg.seed)
 
@@ -195,11 +198,13 @@ class Viewer:
 
     def apply_sliders(self):
         """Push slider values into the config; regenerate only if one changed."""
-        plates, size = (s.value for s in self.sliders)
-        if plates == self.cfg.n_plates and size == self.cfg.width:
+        plates, size, fray = (s.value for s in self.sliders)
+        if (plates == self.cfg.n_plates and size == self.cfg.width
+                and fray == round(self.cfg.margin_h * 100)):
             return
         self.cfg.n_plates = plates
         self.cfg.width, self.cfg.height = size, _map_height(size)
+        self.cfg.margin_h = fray / 100
         self.regenerate(self.cfg.seed)
 
     def text(self, s, x, y, col=(235, 235, 235), font=None):

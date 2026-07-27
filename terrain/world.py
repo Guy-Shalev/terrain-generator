@@ -1,6 +1,6 @@
 """Pipeline: config, stage sequencing, and the finished World object."""
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 
 import numpy as np
 
@@ -13,6 +13,7 @@ class Config:
     width: int = 512
     height: int = 384
     seed: int = 0
+    ref_width: int = 512    # size these knobs are tuned at; see `_scale_to_size`
 
     # --- plates ---
     n_plates: int = 21
@@ -92,6 +93,20 @@ class Config:
     coast_slope: float = 0.024      # max rise per cell as land leaves the shore
     coast_slope_periods: float = 5.0  # how that cap varies along the coast
     coast_plain_zone: float = 30.0    # how far inland the cap reaches, in px
+    margin_h: float = 0.16          # extra fray on a continent-ocean margin
+    margin_h_fine: float = 0.07
+    margin_periods: float = 8.0     # coarse: finer noise breaks the coast up
+    margin_zone: float = 45.0       # falloff from the plate boundary, in px
+    margin_reach: float = 22.0      # width of the coastal corridor, in px
+    margin_gain_max: float = 3.0    # cap on the slope compensation
+    margin_cap: float = 1.0         # clip on the fray noise, in std devs
+    margin_slope_blur: float = 2.0
+    margin_cut_h: float = 0.30      # drowned inlets cut into a margin coast
+    margin_cut_thresh: float = 1.0  # in std devs; higher -> fewer inlets
+    margin_cut_cap: float = 1.5
+    margin_cut_periods: float = 10.0
+    margin_cut_offset: float = 1.0  # centre of the cut window, px inland
+    margin_cut_w: float = 7.0
 
     # --- erosion ---
     erosion_passes: int = 4
@@ -115,6 +130,49 @@ class Config:
     meander_amp: float = 1.5            # lateral swing in cells, times sqrt(width)
     meander_period: float = 30.0        # along-path wavelength, in cells
     meander_taper: float = 8.0          # vertices over which the swing fades out
+
+
+# Knobs measured in pixels. `Config` is tuned at `ref_width`, and these have to
+# follow the map or the world changes shape as it is resized: a landform of
+# fixed pixel width is a smaller and smaller fraction of a growing map, so
+# boundary relief narrows into a hard crease while everything keyed on
+# `periods` - which is already relative to the map - stays put around it.
+# Measured on seed 7, boundary slope over median slope ran 1.22 / 1.50 / 1.99
+# at 384 / 640 / 1024 wide; scaled, it holds at 1.31-1.37.
+_PX_FIELDS = (
+    "plate_warp", "plate_warp_fine", "stress_blur", "stress_spread",
+    "crust_blur", "crust_warp", "collision_w", "trench_w", "arc_offset",
+    "arc_w", "cordillera_w", "rift_w", "ridge_w", "transform_w", "age_scale",
+    "age_warp", "hotspot_sigma", "hotspot_spacing", "texture_warp",
+    "coast_plain_zone", "margin_zone", "margin_reach", "margin_cut_offset",
+    "margin_cut_w", "margin_slope_blur", "meander_period", "meander_taper",
+    "meander_amp", "river_width", "river_width_max",
+)
+# Rises per cell: the same climb spread over more cells is a gentler one.
+_PER_CELL_FIELDS = ("coast_slope", "talus", "outlet_carve_slope")
+
+
+def _scale_to_size(cfg):
+    """Put every pixel-denominated knob back on the map's own scale.
+
+    Returns a copy: callers that keep a `Config` around and regenerate from it
+    - the viewer does - must not have it rescaled underneath them each time.
+
+    `erosion_k` is deliberately left alone. Stream power couples drainage area
+    to slope in cell units and does not scale by any single factor; land area
+    comes out within a tenth of a point across sizes as it is.
+    """
+    s = cfg.width / max(1, cfg.ref_width)
+    if s == 1.0:
+        return cfg
+    cfg = replace(cfg)
+    for k in _PX_FIELDS:
+        setattr(cfg, k, getattr(cfg, k) * s)
+    for k in _PER_CELL_FIELDS:
+        setattr(cfg, k, getattr(cfg, k) / s)
+    cfg.outlet_carve_len = max(1, round(cfg.outlet_carve_len * s))
+    cfg.lake_min_area = max(1, round(cfg.lake_min_area * s * s))   # an area
+    return cfg
 
 
 @dataclass
@@ -169,6 +227,9 @@ def generate(cfg=None, verbose=True, on_stage=None, **overrides):
     cfg = cfg or Config()
     for k, v in overrides.items():
         setattr(cfg, k, v)
+    # After the overrides, so `generate(width=1024)` scales to 1024 and not to
+    # whatever width the config happened to carry when it was built.
+    cfg = _scale_to_size(cfg)
     rng = np.random.default_rng(cfg.seed)
     timings = {}
 
@@ -194,9 +255,12 @@ def generate(cfg=None, verbose=True, on_stage=None, **overrides):
     raw -= level
     pre -= level
     def coastline():
-        # Cap the rise first, then fray, so the reshaped shoreline gets fretted
-        # like any other rather than arriving as a smooth arc.
-        return elevation.fray_coast(elevation.coastal_plain(pre, cfg, rng), cfg, rng)
+        # Cap the rise, shove the plate margins sideways, and only then fray, so
+        # every reshaped shoreline gets fretted like any other rather than
+        # arriving as a smooth arc.
+        h = elevation.coastal_plain(pre, cfg, rng)
+        h = elevation.erode_margins(h, tect, cfg, rng)
+        return elevation.fray_coast(h, cfg, rng)
 
     pre = stage("coastline", coastline)
 

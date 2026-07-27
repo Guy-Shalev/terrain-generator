@@ -11,6 +11,8 @@ nearest boundary", which is what gives belts their width:
     transform      narrow shear scar, slight en-echelon ridging
 
 Then hotspot island chains, fractal texture, sea level, and a frayed coastline.
+Continent-ocean margins get their own shoreline pass: they sit on a much
+steeper slope than the rest of the coast, so elevation noise hardly moves them.
 """
 import numpy as np
 
@@ -175,6 +177,110 @@ def coastal_plain(h, cfg, rng):
     # whole world flattens instead of just the shoreline.
     zone = np.exp(-(inland / cfg.coast_plain_zone) ** 2)
     return np.where(land, h + (np.minimum(h, allowed * inland) - h) * zone, h)
+
+
+def erode_margins(h, t, cfg, rng):
+    """Fray the coast where a continental plate meets an oceanic one.
+
+    Those margins come out visibly smoother than the rest of the shoreline -
+    long clean sweeps where an open coast has inlets, lobes and offshore
+    islands - and the cause is the slope, not missing noise. The crust step
+    across a plate-type boundary is several times steeper than a noise-drawn
+    coast, so the shoreline there sits on a much steeper slope. `fray_coast`
+    perturbs *elevation*, and that moves the zero contour by amplitude/slope,
+    so the same noise buys about half the displacement on a margin. The noise
+    is present; the contour just does not travel far enough to show it.
+
+    So restore the budget rather than the amplitude: scale the fray by the
+    local slope, measured against the median coastal slope of this map, and
+    the displacement comes out the same on both kinds of coast by
+    construction. Taking the reference from the map keeps that true at any
+    resolution, where a fixed slope constant would not.
+
+    Displacing the field sideways instead was the obvious alternative and does
+    not work. A warp moves the contour by the displacement itself whatever the
+    slope, which is the appealing part, but the displacement is coherent over
+    its own wavelength: long waves slide the whole margin across as a smooth
+    arc, and short ones at a useful amplitude fold the field. Measured across
+    four seeds it barely shifted the shoreline's roughness at any frequency.
+
+    The distance gate is not optional. `cont_self` and `cont_other` are pulled
+    from the nearest boundary and so are defined everywhere, which means a
+    continental interior far from any ocean still reads as a full type
+    mismatch; without the gate this fires on coasts that are not margins.
+    """
+    hh, w = h.shape
+    land = h > 0.0
+    if not land.any():
+        return h
+
+    # Distance to the shoreline, negative at sea. Masking by *elevation* is the
+    # obvious choice and is a trap: a band of fixed elevation is only
+    # band/slope cells wide on the ground, about five on a margin, and the
+    # shoreline cannot travel past the point where its own mask has faded. It
+    # caps the stage at the very coasts it exists to fix - measured, ten times
+    # the amplitude bought 0.8 of a cell. A distance corridor is the same width
+    # everywhere whatever the slope, so amplitude turns into travel again.
+    sd = grid.edt(land) - grid.edt(~land)
+    near = (np.abs(t.cont_self - t.cont_other)       # continent meets ocean
+            * _ramp(t.dist, cfg.margin_zone))        # near that boundary
+
+    # Blur first: the gain should follow the margin's overall steepness, not
+    # whatever single-cell texture noise happens to sit under each shore cell.
+    slope = np.hypot(*grid.gradient(grid.blur(h, cfg.margin_slope_blur)))
+    ref = float(np.median(slope[np.abs(sd) < 2.0]))
+    # Only ever boost. Below the reference the coast is already frayed enough,
+    # and scaling down there would flatten the gentle coasts to match.
+    gain = np.clip(slope / max(ref, 1e-9), 1.0, cfg.margin_gain_max)
+
+    # A fresh noise pair, finer than the global fray: the shortfall measured on
+    # these coasts is in small-scale structure, and reusing the same field
+    # would only deepen the fray already there instead of adding detail.
+    #
+    # Both are divided by their own spread. fBm of these octave counts has a
+    # standard deviation near 0.18, not 1, so an amplitude knob used raw is
+    # about five times weaker than it reads and no setting of it does anything
+    # visible. Normalised, `margin_h` is elevation per standard deviation and
+    # the shoreline travels roughly margin_h * gain / slope cells.
+    def unit(periods, octaves=4, ridged=False, cap=None):
+        f = noise.fbm(hh, w, rng, periods=periods, octaves=octaves, ridged=ridged)
+        # Centred as well as scaled: the ridged variant is not zero-mean, and a
+        # threshold in standard deviations should mean the same for both.
+        u = (f - f.mean()) / max(float(f.std()), 1e-9)
+        return u if cap is None else np.clip(u, -cap, cap)
+
+    # Capped like the cut term, and for the same reason. Uncapped, fBm reaches
+    # about 3.5 standard deviations and the slope gain multiplies it by up to
+    # `margin_gain_max`, so the fray could add over a unit of elevation - and
+    # it does that precisely where the coast is steepest, raising mountains
+    # along the shoreline instead of moving it. The clip costs a little travel
+    # at the extremes and nothing anywhere else.
+    #
+    # `margin_periods` is deliberately coarse. Fine noise near the zero contour
+    # does not bend the coastline, it perforates it: at periods 14 this left 18
+    # water pockets cut off from the sea against a baseline of 3. At 8 that is
+    # back to 3, and the shoreline travels further for it - the wanted effect
+    # is a coast that wanders, not one that is speckled.
+    h = h + (near * np.exp(-(sd / cfg.margin_reach) ** 2) * gain
+             * (cfg.margin_h * unit(cfg.margin_periods, cap=cfg.margin_cap)
+                + cfg.margin_h_fine * unit(cfg.margin_periods * 3,
+                                           cap=cfg.margin_cap)))
+
+    # Drowned inlets cut into the coast. Ridged noise, not plain fBm, because
+    # its crests run in lines and a line cut into a coast is a ria; thresholding
+    # plain fBm digs round pits, which read as craters. Clipped non-negative and
+    # subtracted, so this only ever removes land.
+    #
+    # Both the coarseness and the window placement matter more than the depth.
+    # At `margin_cut_periods` 22 and centred 5 cells inland this cut 21 water
+    # pockets off from the sea against a baseline of 3 - holes in the coast
+    # rather than inlets into it. Coarser, shallower, and centred on the
+    # shoreline itself, so a cut opens into the ocean instead of stranding a
+    # basin behind it, that falls to 4 and the shoreline still moves further.
+    cut = np.clip(unit(cfg.margin_cut_periods, octaves=5, ridged=True)
+                  - cfg.margin_cut_thresh, 0.0, cfg.margin_cut_cap)
+    return h - cfg.margin_cut_h * near * _band(sd, cfg.margin_cut_offset,
+                                               cfg.margin_cut_w) * cut
 
 
 def fray_coast(h, cfg, rng):

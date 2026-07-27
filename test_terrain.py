@@ -1,8 +1,9 @@
 """Invariant checks for the generator. Run: python test_terrain.py"""
 import numpy as np
+from scipy import ndimage
 
 from terrain import Config, generate
-from terrain import grid, hydrology, noise, render, rivers
+from terrain import grid, hydrology, noise, render, rivers, world
 
 
 def test_grid_wraps():
@@ -121,6 +122,184 @@ def test_meander_stays_attached():
     assert (ends < 1e-9).all(), "endpoints moved; tributaries would detach"
     assert np.abs(out[:, 1]).max() > 0.2, "no meander at all"
     assert np.abs(out[:, 1]).max() < cfg.meander_amp * np.sqrt(2.0) * 1.5
+
+
+_MARGIN_KW = dict(width=256, height=192, seed=7, erosion_passes=1)
+
+
+def _margin_masks(w):
+    """Margin shoreline and open-coast shoreline of a world."""
+    t, h = w.tect, w.height_pre
+    typ = np.abs(t.cont_self - t.cont_other)
+    coast = np.abs(h) < 0.03
+    return (coast & (typ > 0.8) & (t.dist < w.cfg.margin_zone),
+            coast & (typ < 0.2))
+
+
+def _shore_dist(w, sel):
+    """Mean distance from the cells of `sel` to `w`'s shoreline."""
+    land = w.height_pre > 0
+    return np.abs(grid.edt(land) - grid.edt(~land))[sel].mean()
+
+
+def _travel(before, after, sel):
+    """How far `sel`'s shoreline moved between two worlds, in cells.
+
+    Measured against `before` compared with itself, not against zero: a cell
+    picked by an elevation window is near the contour, not exactly on it, so
+    the raw distance carries a couple of cells of offset either way.
+    """
+    return _shore_dist(after, sel) - _shore_dist(before, sel)
+
+
+def test_margin_fray_moves_the_shoreline():
+    """The fray must actually shift the margin coast, and not the rest.
+
+    Travel is the only honest measure here. Reasoning about it as
+    amplitude/slope overstates it about fivefold, because fBm of these octave
+    counts has a standard deviation near 0.18 rather than 1 - which is exactly
+    why the stage is written against normalised noise.
+    """
+    # Inlets off in both runs: they reshape the coast themselves, and this is
+    # measuring the fray.
+    solo = dict(margin_cut_h=0.0, **_MARGIN_KW)
+    off = generate(Config(margin_h=0.0, margin_h_fine=0.0, **solo), verbose=False)
+    on = generate(Config(**solo), verbose=False)
+    margin, plain = _margin_masks(off)
+    assert margin.sum() > 100 and plain.sum() > 100, "not enough coast to compare"
+    moved, untouched = _travel(off, on, margin), _travel(off, on, plain)
+    assert moved > 0.8, f"margin shoreline barely moved: {moved:.2f} cells"
+    assert abs(untouched) < 0.3, f"open coast moved too: {untouched:.2f} cells"
+
+
+def test_margin_cuts_only_remove_land():
+    """The inlets may lower the surface and never raise it.
+
+    Checked with the fray off, so what is left is the cut term alone. It is
+    clipped non-negative and subtracted, which is what keeps it from filling
+    anything in while it carves.
+    """
+    kw = dict(margin_h=0.0, margin_h_fine=0.0, **_MARGIN_KW)
+    off = generate(Config(margin_cut_h=0.0, **kw), verbose=False)
+    on = generate(Config(**kw), verbose=False)
+    assert (on.height_pre <= off.height_pre + 1e-9).all(), \
+        "the cut term raised the surface somewhere"
+    assert on.land.mean() < off.land.mean(), "no land was removed"
+    drowned = (off.height_pre > 0) & ~(on.height_pre > 0)
+    typ = np.abs(off.tect.cont_self - off.tect.cont_other)
+    assert drowned.sum() > 20, f"only {drowned.sum()} cells drowned"
+    assert drowned[typ < 0.05].sum() < 0.05 * drowned.sum(), \
+        "land drowned away from any plate-type boundary"
+
+
+def test_margin_stage_builds_no_coastal_mountains():
+    """The stage reshapes the shoreline; it must not raise hills along it.
+
+    Two terms failed this way. A fringing-island term, since removed, used a
+    gaussian window centred offshore but wide enough that most of its weight
+    sat on the shoreline. The fray then did it again on its own: uncapped fBm
+    reaches ~3.5 standard deviations and the slope gain multiplies it, so the
+    largest additions landed exactly where the coast is steepest. Both raised
+    mountains along the shore instead of moving it, which is why the noise is
+    clipped now.
+    """
+    off = generate(Config(margin_h=0.0, margin_h_fine=0.0, margin_cut_h=0.0,
+                          **_MARGIN_KW), verbose=False)
+    on = generate(Config(**_MARGIN_KW), verbose=False)
+    assert on.height.max() < off.height.max() + 0.1, \
+        f"the stage raised a new summit: {off.height.max():.2f} -> {on.height.max():.2f}"
+    added = (on.height_pre - off.height_pre).max()
+    assert added < 0.7, f"stage added {added:.2f} of elevation in one cell"
+
+
+def test_margin_stage_does_not_perforate_the_coast():
+    """The stage must bend the coastline, not punch holes through it.
+
+    Two ways it did. Fine noise near the zero contour perforates the coast
+    rather than displacing it, and a cut window centred inland strands the
+    basin behind it instead of opening a channel to the sea. Together, at
+    `margin_periods` 14 and the inlets 5 cells inland, this map went from 14
+    enclosed pockets of water to 45. Coarser noise and a cut centred on the
+    shoreline give 23, and move the shoreline further while doing it.
+    """
+    def pockets(w):
+        """Bodies of water with no connection to the open ocean."""
+        land = w.height > 0
+        wid = land.shape[1]
+        # Labelled on a 3x tiling so a body spanning the x seam stays one body.
+        lab, n = ndimage.label(np.concatenate([~land] * 3, axis=1))
+        sizes = ndimage.sum(np.ones_like(lab), lab, range(1, n + 1))
+        ocean = int(np.argmax(sizes)) + 1
+        mid = lab[:, wid:2 * wid]
+        return len([v for v in np.unique(mid) if v not in (0, ocean)])
+
+    off = generate(Config(margin_h=0.0, margin_h_fine=0.0, margin_cut_h=0.0,
+                          **_MARGIN_KW), verbose=False)
+    on = generate(Config(**_MARGIN_KW), verbose=False)
+    assert pockets(on) < 2 * pockets(off), \
+        f"stage perforated the coast: {pockets(off)} pockets -> {pockets(on)}"
+
+
+def test_margin_fray_stays_on_the_margins():
+    """The stage must touch continent-ocean margins and nothing else.
+
+    `cont_self`/`cont_other` are nearest-boundary pulls and so are defined
+    across the whole map; without the distance gate this would fire on inland
+    coasts far from any plate boundary.
+    """
+    off = generate(Config(margin_h=0.0, margin_h_fine=0.0, margin_cut_h=0.0,
+                          **_MARGIN_KW), verbose=False)
+    on = generate(Config(**_MARGIN_KW), verbose=False)
+    # The stage draws its noise either way, so the two runs stay in step
+    # downstream and the only difference is what it added.
+    d = np.abs(on.height_pre - off.height_pre)
+    t = on.tect
+    typ = np.abs(t.cont_self - t.cont_other)
+    inband = (typ > 0.8) & (t.dist < on.cfg.margin_zone)
+    # The mask is deliberately smooth, so it has a shoulder: at typ 0.2 a fifth
+    # of the effect is still expected and wanted. Only well clear of any type
+    # mismatch should the stage be silent.
+    outside = typ < 0.05
+    assert d[inband].max() > 0.02, "stage did nothing at the margins"
+    assert d[outside].max() < 0.1 * d[inband].max(), "stage leaked off the margins"
+    # The fray is zero-mean and the inlets only carve, so a small net loss is
+    # expected; sea level was fixed by quantile well upstream and does not
+    # move to compensate. Only a runaway would be a bug.
+    assert abs(on.land.mean() - off.land.mean()) < 0.04, \
+        f"land area moved by {on.land.mean() - off.land.mean():+.3f}"
+
+
+def test_config_scales_with_map_size():
+    """Pixel knobs follow the map, and the caller's config is left alone."""
+    cfg = Config(width=1024, height=768)
+    scaled = world._scale_to_size(cfg)
+    assert cfg.plate_warp == 34.0, "the caller's config was mutated"
+    assert scaled.plate_warp == 34.0 * 2, "a pixel width did not scale"
+    # A rise per cell goes the other way: the same climb spread over twice the
+    # cells is half the step.
+    assert abs(scaled.coast_slope - cfg.coast_slope / 2) < 1e-12
+    # At the reference width it must be a no-op.
+    assert world._scale_to_size(Config(width=512)).plate_warp == 34.0
+
+
+def test_relief_does_not_sharpen_with_map_size():
+    """A bigger map must be the same world in more detail, not a harder one.
+
+    `Config` mixes units - `periods` are relative to the map, everything else
+    is pixels - so left unscaled, boundary landforms keep a fixed pixel width
+    and narrow into hard creases as the map grows while the terrain around
+    them stays put. Measured on seed 7, boundary slope over median slope ran
+    1.22 / 1.50 / 1.99 at 384 / 640 / 1024 wide.
+    """
+    def crease(wdt):
+        w = generate(Config(width=wdt, height=int(wdt * 3 / 4) // 2 * 2,
+                            seed=7, erosion_passes=1), verbose=False)
+        s = np.hypot(*grid.gradient(w.height))
+        return np.median(s[w.tect.boundary]) / np.median(s)
+
+    small, big = crease(256), crease(512)
+    assert abs(big - small) < 0.25, \
+        f"boundary relief sharpened with size: {small:.2f} -> {big:.2f}"
 
 
 def test_world():

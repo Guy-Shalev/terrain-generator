@@ -32,7 +32,7 @@ python test_terrain.py       # invariant checks
 | relief | `terrain/elevation.py` | isostatic base plus collision ranges, trenches, volcanic arcs, cordilleras, rifts, mid-ocean ridges, transform scars, seafloor ageing |
 | hotspots | `terrain/elevation.py` | island chains smeared along each plate's own motion |
 | texture | `terrain/elevation.py` | warped ridged fBm, amplitude weighted by local relief and tectonic activity |
-| coastline | `terrain/elevation.py` | sea level by quantile, a bounded rise per cell away from the shore, then noise frays the shoreline |
+| coastline | `terrain/elevation.py` | sea level by quantile, a bounded rise per cell away from the shore, slope-compensated fray and drowned inlets on continent-ocean margins, then noise frays the shoreline |
 | erosion | `terrain/hydrology.py` | thermal creep, depression filling, D8 routing, flow accumulation, stream-power incision, repeated |
 | lakes and rivers | `terrain/rivers.py` | lake surface levelling, outlet carving, polyline extraction, meandering, discharge-based width, channel incision |
 
@@ -56,8 +56,10 @@ layer, `[` `]` cycle. `R` regenerates with a new seed, `T` with the same one,
 The status bar reads out elevation, plate, crust type, distance to the nearest
 plate boundary, and drainage area under the cursor.
 
-Two sliders top right set plate count (4-48) and world size (192-1024 wide, 4:3).
-They apply on release, not while dragging, because a rebuild takes a moment -
+Three sliders top right set plate count (4-48), world size (192-1024 wide,
+4:3) and `margin_h` (0.00-0.40), the extra fray on continent-ocean margins.
+Sliders are integer, so the last one carries hundredths. They apply on
+release, not while dragging, because a rebuild takes a moment -
 roughly 0.4 s at 256x192, 2.4 s at 512x384, 7 s at 768x576 and 18 s at 1024x768.
 `generate(..., on_stage=fn)` reports each stage as it starts, which is what the
 viewer paints on the banner while it works.
@@ -86,11 +88,123 @@ does not work - any offset keyed on distance from the shore raises a bench of
 near-constant width, which reads as a bright ribbon traced round every
 landmass with a shore-parallel river down the middle of it.
 
+Where a continental plate meets an oceanic one the coastline used to come out
+visibly smoother than the rest - long clean sweeps where an open coast has
+inlets, lobes and offshore islands. The crust step across a plate-type
+boundary is several times steeper than a noise-drawn coast, and `fray_coast`
+perturbs *elevation*, so on a margin the same noise moves the shoreline about
+half as far. `erode_margins` works on those margins only, gated by
+`margin_zone`: `cont_self` and `cont_other` are nearest-boundary pulls and so
+are defined everywhere, and without that gate a continental interior far from
+any ocean still reads as a full type mismatch.
+
+It does two things. The fray is scaled by the local slope against the median
+coastal slope of that map, which restores the travel and stays
+resolution-independent where a fixed slope constant would not. Then drowned
+inlets are cut into the coast, from *ridged* noise rather than plain fBm
+because its crests run in lines and a line cut into a coast is a ria, where
+thresholded plain fBm digs round pits that read as craters. The cut is clipped
+non-negative and subtracted, so it only ever removes land.
+
+Both terms are deliberately **coarse**, which matters more than their depth.
+The wanted effect is a coast that wanders, not one that is speckled, and fine
+noise near the zero contour does not bend a coastline - it perforates it.
+Cutting inland has the same failure in mirror: a channel centred behind the
+shore strands the basin it cuts off instead of opening into the sea. Enclosed
+bodies of water with no route to the ocean, counted against a stage-off
+baseline, across four seeds:
+
+| seed | stage off | fine noise, cuts inland | coarse, cuts on the shore |
+|---|---|---|---|
+| 7 | 10 | 33 | 7 |
+| 3 | 0 | 43 | 4 |
+| 21 | 1 | 27 | 4 |
+| 5 | 1 | 21 | 5 |
+
+The coarse settings also move the shoreline *further* (2.43 to 3.22 cells),
+so there was nothing to trade off: the fine detail was buying holes, not
+irregularity.
+
+Everything this stage adds is clipped, and that is not decoration. Twice a
+term here raised mountains along the shoreline instead of moving it:
+
+- A fringing archipelago offshore, since removed. The idea is sound - islands
+  make new coastline, where nudging a contour only ever redraws one line - but
+  a gaussian window centred 6 cells offshore with a width of 8 still carries
+  0.75 of its weight *at* the shoreline and 0.32 of it six cells inland. A
+  retry needs a window narrow relative to its offset, or one masked to
+  strictly negative `sd`.
+- The fray itself, which was the one term left uncapped. fBm reaches about 3.5
+  standard deviations and `margin_gain_max` multiplies it by up to three, so
+  it could add over a unit of elevation - and it did so precisely where the
+  coast is steepest. Uncapped it raised 648 cells by more than 0.4, all but a
+  handful within twelve cells of the shore, taking the map's summit from 0.49
+  to 0.86. Clipped to one standard deviation that falls to 130 cells, the
+  summit returns to 0.49 and shoreline travel is unchanged at 1.8 cells - the
+  clip costs nothing it was supposed to be doing.
+
+Two things about this were not obvious and cost real time:
+
+- **Mask the corridor by distance, not elevation.** A band of fixed elevation
+  is only `band/slope` cells wide on the ground - about five on a margin - so
+  the shoreline cannot travel past the point where its own mask has faded. It
+  caps the stage hardest at the very coasts it exists to fix. Measured, ten
+  times the amplitude bought 0.8 of a cell. A distance corridor is the same
+  width whatever the slope.
+- **fBm here has a standard deviation near 0.18, not 1.** An amplitude knob
+  used raw is about five times weaker than it reads, which is why the island
+  term sat at 0.055 against a shelf 0.236 deep and never surfaced. Both noise
+  fields are normalised by their own spread, so `margin_h` is elevation per
+  standard deviation and the knobs mean what they say. Reasoning about travel
+  as amplitude/slope overstates it by the same factor; the empirical
+  before/after shoreline distance is the measure to trust.
+
+Displacing the field sideways instead is the obvious alternative and does not
+work. A domain warp moves the contour by the displacement itself whatever the
+slope, which is the appealing part, but that displacement is coherent over its
+own wavelength: long waves slide the whole margin across as a smooth arc, and
+short ones at a useful amplitude fold the field. Across four seeds and a sweep
+of frequency and amplitude it never shifted the shoreline's roughness by more
+than a couple of percent at any scale.
+
 Colour is deliberately restrained below sea level. Shelf water and open ocean
 are the same water, so the sea ramp spans a narrow band of blues and the
 shading is flattened under water; seafloor structure reads as relief, not as a
 bright halo drawn around every coast. `crust_sharpness` and `crust_blur` set
 how gradually continental crust thins out, and so how wide the shelf is.
+
+## Map size
+
+`Config` mixes two unit systems, and it has to. Noise `periods` counts are
+relative to the map, so they scale with it for free; everything else - warp
+amplitudes, blur sigmas, the falloff widths of every landform - is in pixels
+and does not. Left alone, growing the map shrinks every pixel quantity
+relative to the world: boundary relief keeps a fixed pixel width and narrows
+into a hard crease, the warps that hide the Voronoi partition become too small
+to hide it, and straight plate edges surface in the open ocean. Measured on
+seed 7 as boundary slope over the map's median slope:
+
+| width | unscaled | scaled |
+|---|---|---|
+| 384 | 1.22 | 1.37 |
+| 640 | 1.50 | 1.32 |
+| 1024 | 1.99 | 1.31 |
+
+So `generate` scales every pixel-denominated knob by `width / ref_width`
+before anything runs (`_scale_to_size` in `terrain/world.py`, listed in
+`_PX_FIELDS`). Rises per cell - `coast_slope`, `talus`, `outlet_carve_slope` -
+scale the other way, and `lake_min_area` by the square, being an area. It
+returns a copy, because the viewer keeps one `Config` and regenerates from it
+and must not have it rescaled underneath it each time. Set `ref_width` equal
+to `width` to turn the whole thing off.
+
+`erosion_k` is deliberately left out: stream power couples drainage area to
+slope in cell units and does not follow any single factor. Land area lands
+within half a point across 256-1024 as it is.
+
+Resolution is not fully free even so - octave counts are fixed, so the finest
+noise sits a fixed number of octaves below the map rather than at a fixed
+pixel size, and a big map carries proportionally less fine detail.
 
 ## Tuning
 
