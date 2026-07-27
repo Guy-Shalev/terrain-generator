@@ -56,10 +56,14 @@ layer, `[` `]` cycle. `R` regenerates with a new seed, `T` with the same one,
 The status bar reads out elevation, plate, crust type, distance to the nearest
 plate boundary, and drainage area under the cursor.
 
-Three sliders top right set plate count (4-48), world size (192-1024 wide,
-4:3) and `margin_h` (0.00-0.40), the extra fray on continent-ocean margins.
-Sliders are integer, so the last one carries hundredths. They apply on
-release, not while dragging, because a rebuild takes a moment -
+Four sliders top right set plate count (4-48), world size (192-1024 wide,
+4:3), `land_fraction` as a whole percent (0-100, shown as land/sea) and
+`margin_h` (0.00-0.40), the extra fray on continent-ocean margins. Sliders are
+integer, so the last one carries hundredths. Sea level is a quantile of the
+elevation field, so the whole land range works and the result lands within a
+point or so of the setting; 0 and 100 are degenerate but do not fail - an
+all-ocean world simply has no rivers. They apply on release, not while
+dragging, because a rebuild takes a moment -
 roughly 0.4 s at 256x192, 2.4 s at 512x384, 7 s at 768x576 and 18 s at 1024x768.
 `generate(..., on_stage=fn)` reports each stage as it starts, which is what the
 viewer paints on the banner while it works.
