@@ -264,10 +264,14 @@ def generate(cfg=None, verbose=True, on_stage=None, **overrides):
 
     pre = stage("coastline", coastline)
 
-    eroded = stage("erosion", lambda: hydrology.stream_power(
+    eroded, eroded_filled, _, eroded_rec = stage("erosion", lambda: hydrology.stream_power(
         pre.copy(), 0.0, cfg.erosion_passes, cfg.erosion_k, cfg.erosion_m,
-        cfg.erosion_n, cfg.thermal_iters, cfg.talus))[0]
-    h, water = stage("rivers", lambda: rivers.build(eroded.copy(), cfg, rng))
+        cfg.erosion_n, cfg.thermal_iters, cfg.talus))
+    # Erosion signs off by filling and routing its finished surface, and the
+    # river stage opens by needing exactly that. Hand it over instead of
+    # letting it be recomputed.
+    h, water = stage("rivers", lambda: rivers.build(
+        eroded.copy(), cfg, rng, routed=(eroded_filled, eroded_rec)))
 
     world = World(cfg=cfg, tect=tect, height_raw=raw, height_pre=pre,
                   height_eroded=eroded, height=h, water=water, timings=timings)

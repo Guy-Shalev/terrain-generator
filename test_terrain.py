@@ -56,6 +56,42 @@ def test_fill_warm_start_is_exact():
         assert np.abs(hydrology.fill_depressions(h) - exact).max() < 1e-12, shape
 
 
+def test_halo_matches_shift():
+    """`Halo` is a speed trick and must return exactly what `shift` returns.
+
+    It replaces the fancy-index gather in the thermal and routing loops, which
+    was the single most expensive thing in the generator. The wrap-x and
+    clamp-y edges are the whole subtlety: the corners have to inherit the
+    wrapped columns, so the buffer's x edges are filled before its y edges.
+    """
+    for shape in ((5, 7), (2, 3), (9, 4)):
+        a = np.arange(shape[0] * shape[1], dtype=float).reshape(shape) * 0.37
+        halo = grid.Halo(shape).load(a)
+        for dy, dx in grid.NEIGH8:
+            assert np.array_equal(halo.at(dy, dx), grid.shift(a, dy, dx)), \
+                f"{shape} offset {(dy, dx)}"
+            assert np.array_equal(grid.neighbour_index(shape, dy, dx),
+                                  grid.shift(np.arange(a.size).reshape(shape),
+                                             dy, dx))
+
+
+def test_carve_outlets_ignores_a_handed_in_routing():
+    """Passing the erosion stage's routing in must not change the result.
+
+    The river stage opens by filling and routing the surface erosion just
+    filled and routed, so the answer is handed over instead. It is only valid
+    before the first notch, which is why carve_outlets drops it after one use.
+    """
+    cfg = Config(width=128, height=128, seed=4)
+    h = _bumpy((128, 128), 7)
+    h[40:70, 40:70] -= 0.6                       # a basin to carve out of
+    filled = hydrology.fill_depressions(h, 0.0)
+    rec, _, _ = hydrology.flow_routing(filled)
+    plain = rivers.carve_outlets(h.copy(), cfg)
+    handed = rivers.carve_outlets(h.copy(), cfg, routed=(filled, rec))
+    assert np.array_equal(plain, handed), "handing the routing in changed the carve"
+
+
 def test_accumulate_matches_ordered_walk():
     """Level peeling and the elevation-ordered walk are both topological."""
     h = _bumpy((96, 128), 4)

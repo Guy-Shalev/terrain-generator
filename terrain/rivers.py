@@ -78,18 +78,31 @@ def _levels(lbl, n, filled):
     return level
 
 
-def carve_outlets(h, cfg, sea_level=0.0):
+def carve_outlets(h, cfg, sea_level=0.0, routed=None):
     """Notch each lake's pour point and cut a channel downstream from it.
 
     Without this a basin fills to its rim and the water has no modelled way
     out: the map shows a lake with no outflowing river and no valley below it.
+
+    `routed` is an optional (filled, receivers) already computed for `h` as it
+    arrives. The erosion stage finishes by filling and routing the very surface
+    handed here and its caller throws that away, so the first pass would
+    otherwise redo it - a third of a second at 1024x768. It is used once and
+    dropped, because after the first notch the surface is no longer the one it
+    describes.
     """
     for _ in range(cfg.outlet_carve_passes):
-        filled = hydrology.fill_depressions(h, sea_level)
+        if routed is not None:
+            filled, rec = routed
+            routed = None
+        else:
+            filled = hydrology.fill_depressions(h, sea_level)
+            rec = None
         lbl, n = _label_lakes(h, filled, cfg, sea_level)
         if n == 0:
             break
-        rec, _, _ = hydrology.flow_routing(filled)
+        if rec is None:
+            rec, _, _ = hydrology.flow_routing(filled)
 
         # Rim = cells just outside a lake. The lowest one is where it spills.
         rim = np.zeros_like(lbl)
@@ -241,9 +254,12 @@ def rasterize(paths, widths, shape):
 # --------------------------------------------------------------------------
 
 
-def build(h, cfg, rng, sea_level=0.0):
-    """Run the whole stage. Returns (incised height, Water)."""
-    h = carve_outlets(h, cfg, sea_level)
+def build(h, cfg, rng, sea_level=0.0, routed=None):
+    """Run the whole stage. Returns (incised height, Water).
+
+    `routed` is passed straight to `carve_outlets`; see its note.
+    """
+    h = carve_outlets(h, cfg, sea_level, routed)
 
     filled = hydrology.fill_depressions(h, sea_level)
     rec, _, _ = hydrology.flow_routing(filled)

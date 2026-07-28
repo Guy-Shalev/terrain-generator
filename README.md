@@ -251,13 +251,14 @@ No climate, biomes, or anything human-made. Lake outflow is carved, not
 simulated - lake levels do not respond to a water balance, and a river cannot
 change course after the fact.
 
-Cost is roughly 0.4 s at 256x192, 2.4 s at 512x384 and 18 s at 1024x768, and
+Cost is roughly 0.35 s at 256x192, 1.8 s at 512x384 and 14 s at 1024x768, and
 varies by 30-40% run to run on the same machine. Erosion is about half of it
 and the river stage most of the rest.
 
-The large sizes used to be far worse (59 s at 1024x768). Five changes, none of
-which alter the output - the fill and the accumulation are verified
-bit-identical to the straightforward versions in `test_terrain.py`:
+The large sizes used to be far worse (59 s at 1024x768). Seven changes, none of
+which alter the output - the fill, the accumulation, the halo and the handed-in
+routing are verified bit-identical to the straightforward versions in
+`test_terrain.py`:
 
 - depression filling gets a **multigrid warm start**. Planchon-Darboux only
   ever lowers its estimate, so any upper bound converges to the same surface;
@@ -275,3 +276,20 @@ bit-identical to the straightforward versions in `test_terrain.py`:
 - flow accumulation peels the drainage tree a level at a time instead of
   walking cell by cell in elevation order, and each Perlin octave evaluates its
   four lattice corners once rather than six times.
+- neighbour reads go through **`grid.Halo`**, a one-cell padded copy carrying
+  the same wrap-x and clamp-y edges, so all eight offsets are slices of one
+  buffer. `shift` is a broadcast fancy-index gather - it reads the whole grid
+  out of order into a fresh array - and it was the most expensive single thing
+  the generator did: 928 calls and over a second of a six second build at
+  768x576, three quarters of them from the thermal loop. One contiguous copy
+  replaces sixteen gathers a sweep, taking a thermal iteration's neighbour
+  reads from 19.4 ms to 0.11 ms. Routing also caches the flat index grid a
+  neighbour maps to, which depends only on shape and offset.
+- the river stage is **handed the erosion stage's final fill and routing**
+  instead of recomputing them. Erosion signs off by filling and routing its
+  finished surface, `carve_outlets` opens by needing exactly that, and the
+  result was being thrown away in between - a third of a second at 1024x768.
+  It is only valid before the first notch, so it is used once and dropped.
+
+Together those two took erosion 1.5-1.7x faster and the river stage up to
+2.5x, and the whole build from 17.2 s to 14.1 s at 1024x768.

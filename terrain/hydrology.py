@@ -27,16 +27,22 @@ def thermal(h, iters=30, talus=0.035, rate=0.35, mask=None):
     if mask is not None:
         factor = mask.astype(h.dtype) * factor
     delta = np.empty_like(h)
+    # Two padded buffers instead of sixteen gathers a sweep: one to read the
+    # neighbours of `h` out of, one to hand `give` back to the cell it came
+    # from. Same values either way, so the result is unchanged.
+    around = grid.Halo(h.shape, h.dtype)
+    sent = grid.Halo(h.shape, h.dtype)
+    give = np.empty_like(h)
     for _ in range(iters):
         delta[:] = 0.0
+        around.load(h)
         for (dy, dx), dist in zip(grid.NEIGH8, grid.DIST8):
-            give = grid.shift(h, dy, dx)
-            np.subtract(h, give, out=give)
+            np.subtract(h, around.at(dy, dx), out=give)
             np.subtract(give, talus * dist, out=give)
             np.clip(give, 0, None, out=give)
             np.multiply(give, factor, out=give)
             np.subtract(delta, give, out=delta)
-            np.add(delta, grid.shift(give, -dy, -dx), out=delta)
+            np.add(delta, sent.load(give).at(-dy, -dx), out=delta)
         if not delta.any():     # nothing anywhere exceeds the angle of repose
             break
         h += delta
@@ -123,15 +129,20 @@ def fill_depressions(h, sea_level=0.0, eps=1e-5, max_iters=400):
 def flow_routing(filled):
     """D8 steepest descent. Returns (receiver index, distance to receiver)."""
     h, w = filled.shape
-    idx = np.arange(h * w).reshape(h, w)
-    rec = idx.copy()
+    rec = np.arange(h * w).reshape(h, w).copy()
     rec_d = np.ones_like(filled)
     best = np.zeros_like(filled)
+    # The neighbour heights come out of one padded copy, and the index grid a
+    # neighbour maps to depends only on the shape and the offset, so it is
+    # built once and cached rather than gathered on every call.
+    around = grid.Halo(filled.shape, filled.dtype).load(filled)
+    slope = np.empty_like(filled)
     for (dy, dx), dist in zip(grid.NEIGH8, grid.DIST8):
-        slope = (filled - grid.shift(filled, dy, dx)) / dist
+        np.subtract(filled, around.at(dy, dx), out=slope)
+        np.divide(slope, dist, out=slope)
         take = slope > best
         best[take] = slope[take]
-        rec[take] = grid.shift(idx, dy, dx)[take]
+        rec[take] = grid.neighbour_index(filled.shape, dy, dx)[take]
         rec_d[take] = dist
     return rec, rec_d, best
 
