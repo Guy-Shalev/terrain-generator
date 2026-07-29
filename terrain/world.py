@@ -126,6 +126,7 @@ class Config:
     river_threshold: float = 0.0006     # drainage area needed to become a river
     river_width: float = 0.85           # channel width in cells at that threshold
     river_width_max: float = 4.0
+    river_width_exp: float = 0.45       # width goes as discharge to this power
     river_incision: float = 0.02        # how deep the channel sits in the bed
     meander_amp: float = 1.5            # lateral swing in cells, times sqrt(width)
     meander_period: float = 30.0        # along-path wavelength, in cells

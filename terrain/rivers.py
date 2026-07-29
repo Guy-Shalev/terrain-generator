@@ -296,8 +296,14 @@ def build(h, cfg, rng, sea_level=0.0, routed=None):
     paths, widths = [], []
     for pts in polylines(flow, rec, channel):
         q = flow[pts[:, 0].astype(int), pts[:, 1].astype(int)]
-        # Hydraulic geometry: width scales with the square root of discharge.
-        wv = np.clip(cfg.river_width * np.sqrt(q / thresh), 0.7, cfg.river_width_max)
+        # Hydraulic geometry: width goes as a power of discharge. The classic
+        # exponent is a half; a little under that holds the trunks in without
+        # touching the headwaters, which sit on the 0.7 floor either way.
+        # Capping instead only bites on the top percentile and flattens all of
+        # it to one width, and lowering `river_width` narrows the mid-sized
+        # channels along with the big ones.
+        wv = np.clip(cfg.river_width * (q / thresh) ** cfg.river_width_exp,
+                     0.7, cfg.river_width_max)
         pts = _unwrap_x(pts, h.shape[1])
         pts = meander(_smooth(pts), wv, cfg, rng)
         paths.append(pts)

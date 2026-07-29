@@ -75,7 +75,13 @@ def relief(h, shade=True, surface=None):
     return rgb
 
 
-LAKE_RAMP = [(0.0, (108, 162, 190)), (0.25, (72, 126, 168)), (1.0, (32, 74, 124))]
+# Narrower than the sea ramp on purpose. A lake drowns whatever valley was
+# already cut through its basin, so the old channel is its deepest part by some
+# margin - three times the median depth is ordinary - and a wide ramp draws that
+# channel back in as a dark line running under the water, which reads as a river
+# showing through rather than as a lake.
+LAKE_RAMP = [(0.0, (104, 158, 188)), (0.35, (84, 138, 178)), (1.0, (60, 108, 158))]
+LAKE_DEPTH_BLUR = 2.0   # softens the drowned channel out of the depth shading
 RIVER_RAMP = [(0.0, (110, 165, 195)), (0.4, (78, 132, 176)), (1.0, (48, 96, 150))]
 
 
@@ -88,8 +94,12 @@ def water_map(w, shade=True):
     wat = w.water
     rgb = relief(w.height, shade, surface=w.surface)
     if wat.lake_mask.any():
-        d = np.clip(wat.lake_depth / max(1e-6, float(np.percentile(
-            wat.lake_depth[wat.lake_mask], 92))), 0, 1)
+        # Shaded off a blurred depth: the ramp is meant to say how deep the
+        # basin is, not to trace the metre-wide channel at the bottom of it.
+        # `wat.lake_depth` itself is left exact for anyone reading the field.
+        soft = grid.blur(wat.lake_depth, LAKE_DEPTH_BLUR)
+        d = np.clip(soft / max(1e-6, float(np.percentile(
+            soft[wat.lake_mask], 92))), 0, 1)
         rgb = np.where(wat.lake_mask[..., None], _ramp(d, LAKE_RAMP), rgb)
     if wat.river_mask.any():
         v = np.clip(wat.width / max(1e-6, w.cfg.river_width_max), 0, 1)

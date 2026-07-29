@@ -274,8 +274,16 @@ Rivers are traced out of the D8 network as head-to-mouth paths, smoothed to
 shed the eight-direction staircase, then displaced sideways by 1-D noise along
 their own arc length - amplitude scaling with channel width, tapered to zero at
 both ends so tributaries stay attached to their trunk. Width comes from
-discharge (`w` proportional to the square root of drainage area), and the bed is
-incised under the finished channel.
+discharge, as `river_width` times drainage area to `river_width_exp`, and the
+bed is incised under the finished channel.
+
+That exponent is 0.45 rather than the classic half, which holds the trunks in
+without touching the headwaters - at 512x384 the widest channel goes from 3.89
+cells to 3.34 while the median stays on the 0.7 floor. It is the right lever
+for the job: `river_width_max` never binds (nothing reaches it at any size, so
+lowering it enough to matter flattens the whole top percentile to one width),
+and lowering `river_width` narrows the mid-sized channels along with the big
+ones.
 
 `world.water` holds it all: `lake_id`, `lake_level`, `lake_depth`, `width`,
 `polylines`, plus `flow` and `receivers`. `world.surface` returns the water
