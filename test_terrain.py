@@ -87,8 +87,9 @@ def test_carve_outlets_ignores_a_handed_in_routing():
     h[40:70, 40:70] -= 0.6                       # a basin to carve out of
     filled = hydrology.fill_depressions(h, 0.0)
     rec, _, _ = hydrology.flow_routing(filled)
+    flow = hydrology.accumulate(filled, rec)
     plain = rivers.carve_outlets(h.copy(), cfg)
-    handed = rivers.carve_outlets(h.copy(), cfg, routed=(filled, rec))
+    handed = rivers.carve_outlets(h.copy(), cfg, routed=(filled, rec, flow))
     assert np.array_equal(plain, handed), "handing the routing in changed the carve"
 
 

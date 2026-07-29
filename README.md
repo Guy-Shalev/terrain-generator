@@ -56,14 +56,24 @@ layer, `[` `]` cycle. `R` regenerates with a new seed, `T` with the same one,
 The status bar reads out elevation, plate, crust type, distance to the nearest
 plate boundary, and drainage area under the cursor.
 
-Four sliders top right set plate count (4-48), world size (192-1024 wide,
-4:3), `land_fraction` as a whole percent (0-100, shown as land/sea) and
-`margin_h` (0.00-0.40), the extra fray on continent-ocean margins. Sliders are
-integer, so the last one carries hundredths. Sea level is a quantile of the
-elevation field, so the whole land range works and the result lands within a
-point or so of the setting; 0 and 100 are degenerate but do not fail - an
-all-ocean world simply has no rivers. They apply on release, not while
-dragging, because a rebuild takes a moment -
+Six sliders top right, in two groups. The world: plate count (4-48), size
+(192-1024 wide, 4:3), `land_fraction` as a whole percent (shown as land/sea),
+and `margin_h` (0.00-0.40), the fray on continent-ocean margins. Then the
+water: river count and lake count.
+
+Both counts are cutoffs in the config and run backwards - a river needs
+`river_threshold` of drainage area, a lake `lake_min_depth` of depth, so
+raising either leaves fewer. The sliders carry a divisor instead, counting
+upwards the way a reader expects, with 6 reproducing the config defaults.
+Measured at 320x240: rivers 28 / 83 / 462 at slider 2 / 6 / 30 and lakes
+0 / 10 / 16 at 1 / 6 / 30, each moving its own target and leaving the other
+alone. Channel width (`river_width`, and `river_width_max` which caps it) and
+meander amplitude (`meander_amp`) stay config-only.
+
+Sea level is a quantile of the elevation field, so the whole land range works
+and the result lands within a point or so of the setting; 0 and 100 are
+degenerate but do not fail - an all-ocean world simply has no rivers. They
+apply on release, not while dragging, because a rebuild takes a moment -
 roughly 0.4 s at 256x192, 2.4 s at 512x384, 7 s at 768x576 and 18 s at 1024x768.
 `generate(..., on_stage=fn)` reports each stage as it starts, which is what the
 viewer paints on the banner while it works.
@@ -232,6 +242,24 @@ terrain. Each lake's pour point is then notched and a channel is carved
 downstream, which gives it a real outflow and a valley to drain through; filling
 and routing are redone afterwards because the surface changed. Some shallow
 basins drain away entirely at that point, which is the intended outcome.
+
+A gorge is only cut where the outflow clears `river_threshold` - the same bar a
+channel has to clear to be drawn as a river. Carving used to ignore it, and the
+two then disagreed: the gorge is real terrain, but with no river drawn in it a
+high threshold left dry trenches winding across the map. At 384x288 that was 1%
+of the dug cells at the default threshold and 30% at six times it, which is
+where it becomes obvious. Discharge at the pour point is the right test because
+it is exactly what would flow down the gorge, and it is measured on the
+*filled* surface, where a lake's whole catchment already routes through its
+spill point. The erosion stage has already accumulated that field and its
+caller was discarding it, so the test costs nothing.
+
+The trade is that basins whose outflow is under the bar keep their water
+instead of being drained: on seed 7 at 384x288, 9 lakes become 45, and lake
+area goes from 0.3% of the map to 1.0%. Land area and river count are
+unchanged. They read as small tarns rather than as speckle, and it is the
+consistent answer - a basin too small to feed a river is too small to cut a
+gorge either.
 
 Rivers are traced out of the D8 network as head-to-mouth paths, smoothed to
 shed the eight-direction staircase, then displaced sideways by 1-D noise along

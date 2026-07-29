@@ -84,16 +84,30 @@ def carve_outlets(h, cfg, sea_level=0.0, routed=None):
     Without this a basin fills to its rim and the water has no modelled way
     out: the map shows a lake with no outflowing river and no valley below it.
 
-    `routed` is an optional (filled, receivers) already computed for `h` as it
-    arrives. The erosion stage finishes by filling and routing the very surface
-    handed here and its caller throws that away, so the first pass would
-    otherwise redo it - a third of a second at 1024x768. It is used once and
-    dropped, because after the first notch the surface is no longer the one it
-    describes.
+    A gorge is only cut where the outflow is big enough to become a river.
+    Carving is not gated by `river_threshold` otherwise, and the two then
+    disagree: the gorge is real terrain but no river is drawn in it, so a very
+    high threshold leaves dry trenches winding across the map with no water in
+    them. At 384x288 that is 1% of the dug cells at the default threshold and
+    30% at six times it. Discharge at the pour point is the right test because
+    it is exactly what would flow down the gorge - and it is measured on the
+    *filled* surface, where the lake's whole catchment already routes through
+    its spill point.
+
+    `routed` is an optional (filled, receivers, drainage area) already computed
+    for `h` as it arrives. The erosion stage finishes by filling, routing and
+    accumulating the very surface handed here and its caller throws that away,
+    so the first pass would otherwise redo it - a third of a second at
+    1024x768. The fill and routing are used once and dropped, because after the
+    first notch the surface is no longer the one they describe; the drainage
+    area is kept for every pass, since carving deepens channels without moving
+    the catchments that feed them.
     """
+    thresh = cfg.river_threshold * h.size
+    flow = None
     for _ in range(cfg.outlet_carve_passes):
         if routed is not None:
-            filled, rec = routed
+            filled, rec, flow = routed
             routed = None
         else:
             filled = hydrology.fill_depressions(h, sea_level)
@@ -103,6 +117,8 @@ def carve_outlets(h, cfg, sea_level=0.0, routed=None):
             break
         if rec is None:
             rec, _, _ = hydrology.flow_routing(filled)
+        if flow is None:
+            flow = hydrology.accumulate(filled, rec)
 
         # Rim = cells just outside a lake. The lowest one is where it spills.
         rim = np.zeros_like(lbl)
@@ -115,9 +131,11 @@ def carve_outlets(h, cfg, sea_level=0.0, routed=None):
         idx = np.arange(1, n + 1)
         pours = ndimage.minimum_position(h, rim, index=idx)
 
-        flat, recf = h.ravel(), rec.ravel()
+        flat, recf, flowf = h.ravel(), rec.ravel(), flow.ravel()
         for pos in np.atleast_2d(pours):
             c = int(pos[0]) * h.shape[1] + int(pos[1])
+            if flowf[c] < thresh:   # too little water to cut, or to draw
+                continue
             cur = flat[c] - cfg.outlet_carve_depth
             for _ in range(cfg.outlet_carve_len):
                 flat[c] = min(flat[c], cur)
@@ -257,7 +275,8 @@ def rasterize(paths, widths, shape):
 def build(h, cfg, rng, sea_level=0.0, routed=None):
     """Run the whole stage. Returns (incised height, Water).
 
-    `routed` is passed straight to `carve_outlets`; see its note.
+    `routed` is (filled, receivers, drainage area) and goes straight to
+    `carve_outlets`; see its note.
     """
     h = carve_outlets(h, cfg, sea_level, routed)
 

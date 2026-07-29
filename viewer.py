@@ -17,9 +17,19 @@ def _map_height(width):
     return int(width * 3 / 4) // 2 * 2
 
 
+# "How many rivers" and "how many lakes" are cutoffs in the config: a river
+# needs this much drainage area, a lake this much depth, so *raising* either
+# knob leaves fewer. Sliders read better counting upwards, so they carry a
+# divisor - slider 6 reproduces the config defaults, and the numerators are
+# taken from those defaults so the two stay in step.
+_C = Config()
+RIVER_SCALE = _C.river_threshold * 6      # river_threshold = RIVER_SCALE / v
+LAKE_SCALE = _C.lake_min_depth * 6        # lake_min_depth  = LAKE_SCALE / v
+
+
 HELP = [
     "left drag / arrows / WASD   pan",
-    "sliders (top right)         plates, size, land %, coast roughness",
+    "sliders (top right)         world, coast, rivers, lakes",
     "wheel / + -                 zoom      (Z resets)",
     "1..9, 0, -                  layer     ([ ] cycles all)",
     "R                           regenerate, new seed",
@@ -106,6 +116,8 @@ class Viewer:
             # Sliders are integer, so this one carries hundredths.
             Slider("shelf coast roughness", 0, 40, round(cfg.margin_h * 100),
                    fmt=lambda v: f"{v / 100:.2f}"),
+            Slider("rivers", 1, 30, round(RIVER_SCALE / cfg.river_threshold)),
+            Slider("lakes", 1, 30, round(LAKE_SCALE / cfg.lake_min_depth)),
         ]
         self.regenerate(cfg.seed)
 
@@ -211,17 +223,32 @@ class Viewer:
             s.layout(x0 + 12, y0 + 12 + i * Slider.ROW_H, gutter)
             s.draw(self.screen, self.font)
 
+    def wanted(self):
+        """The config the sliders are currently asking for.
+
+        Returned as a mapping rather than unpacked positionally: comparing it
+        against the live config is what decides whether a rebuild is needed,
+        and one dict does that for any number of sliders. Every value here is
+        derived from an integer by fixed arithmetic, so the equality test in
+        `apply_sliders` is exact.
+        """
+        plates, size, land, rough, rivers, lakes = (s.value for s in self.sliders)
+        return {
+            "n_plates": plates,
+            "width": size, "height": _map_height(size),
+            "land_fraction": land / 100,
+            "margin_h": rough / 100,
+            "river_threshold": RIVER_SCALE / rivers,
+            "lake_min_depth": LAKE_SCALE / lakes,
+        }
+
     def apply_sliders(self):
         """Push slider values into the config; regenerate only if one changed."""
-        plates, size, land, fray = (s.value for s in self.sliders)
-        if (plates == self.cfg.n_plates and size == self.cfg.width
-                and land == round(self.cfg.land_fraction * 100)
-                and fray == round(self.cfg.margin_h * 100)):
+        want = self.wanted()
+        if all(getattr(self.cfg, k) == v for k, v in want.items()):
             return
-        self.cfg.n_plates = plates
-        self.cfg.width, self.cfg.height = size, _map_height(size)
-        self.cfg.land_fraction = land / 100
-        self.cfg.margin_h = fray / 100
+        for k, v in want.items():
+            setattr(self.cfg, k, v)
         self.regenerate(self.cfg.seed)
 
     def text(self, s, x, y, col=(235, 235, 235), font=None):
