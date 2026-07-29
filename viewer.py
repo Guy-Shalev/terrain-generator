@@ -19,7 +19,7 @@ def _map_height(width):
 
 HELP = [
     "left drag / arrows / WASD   pan",
-    "sliders (top right)         plates, size, land %, margin fray",
+    "sliders (top right)         plates, size, land %, coast roughness",
     "wheel / + -                 zoom      (Z resets)",
     "1..9, 0, -                  layer     ([ ] cycles all)",
     "R                           regenerate, new seed",
@@ -35,20 +35,30 @@ class Slider:
     """One integer slider. Regeneration is seconds long, so the caller applies
     the value on release, not while dragging."""
 
-    LABEL_W, TRACK_W, ROW_H = 152, 150, 26
+    TRACK_W, ROW_H, LABEL_PAD = 150, 26, 10
 
     def __init__(self, label, lo, hi, value, step=1, fmt=str):
         self.label, self.lo, self.hi, self.step, self.fmt = label, lo, hi, step, fmt
         self.value = value
         self.rect = pygame.Rect(0, 0, self.TRACK_W, 14)
         self.grabbed = False
+        self._gutter = None
 
-    def layout(self, x, y):
-        self.rect.topleft = (x + self.LABEL_W, y)
+    def gutter(self, font):
+        """How much room this slider's label needs, at its *widest* value.
 
-    @property
-    def width(self):
-        return self.LABEL_W + self.TRACK_W
+        Measured over every value it can take, not the current one: sized to
+        the value under the cursor, the track would shift left and right as the
+        knob is dragged. Measured once and kept - the label set never changes.
+        """
+        if self._gutter is None:
+            self._gutter = self.LABEL_PAD + max(
+                font.size(f"{self.label} {self.fmt(v)}")[0]
+                for v in range(self.lo, self.hi + 1, self.step))
+        return self._gutter
+
+    def layout(self, x, y, gutter):
+        self.rect.topleft = (x + gutter, y)
 
     def hit(self, pos):
         return self.rect.inflate(16, 14).collidepoint(pos)
@@ -68,7 +78,7 @@ class Slider:
         pygame.draw.circle(screen, (235, 240, 250) if self.grabbed else (190, 205, 225),
                            (knob, cy), 6)
         img = font.render(f"{self.label} {self.fmt(self.value)}", True, (215, 220, 230))
-        screen.blit(img, (self.rect.x - self.LABEL_W, cy - img.get_height() // 2))
+        screen.blit(img, (self.rect.x - self.gutter(font), cy - img.get_height() // 2))
 
 
 class Viewer:
@@ -94,7 +104,7 @@ class Viewer:
             Slider("land/sea", 0, 100, round(cfg.land_fraction * 100),
                    fmt=lambda v: f"{v}/{100 - v}"),
             # Sliders are integer, so this one carries hundredths.
-            Slider("margin fray", 0, 40, round(cfg.margin_h * 100),
+            Slider("shelf coast roughness", 0, 40, round(cfg.margin_h * 100),
                    fmt=lambda v: f"{v / 100:.2f}"),
         ]
         self.regenerate(cfg.seed)
@@ -188,14 +198,17 @@ class Viewer:
             pygame.draw.circle(self.screen, col, (int(p), int(q)), 4)
 
     def draw_sliders(self):
-        w = max(s.width for s in self.sliders) + 24
+        # One gutter for all of them, wide enough for the longest label, so the
+        # tracks line up in a column instead of stepping in and out per row.
+        gutter = max(s.gutter(self.font) for s in self.sliders)
+        w = gutter + Slider.TRACK_W + 24
         h = Slider.ROW_H * len(self.sliders) + 14
         x0, y0 = self.screen.get_width() - w - 10, 38
         panel = pygame.Surface((w, h), pygame.SRCALPHA)
         panel.fill((0, 0, 0, 165))
         self.screen.blit(panel, (x0, y0))
         for i, s in enumerate(self.sliders):
-            s.layout(x0 + 12, y0 + 12 + i * Slider.ROW_H)
+            s.layout(x0 + 12, y0 + 12 + i * Slider.ROW_H, gutter)
             s.draw(self.screen, self.font)
 
     def apply_sliders(self):
@@ -248,7 +261,10 @@ class Viewer:
             self.text(self.busy, 12, 40, (255, 200, 120), self.big)
         if self.show_help:
             y = self.screen.get_height() - 20 * len(HELP) - 12
-            panel = pygame.Surface((430, 20 * len(HELP) + 8), pygame.SRCALPHA)
+            # Sized to the longest line rather than a fixed width: at a fixed
+            # one, editing any help text runs it off the end of its backing.
+            wide = max(self.font.size(line)[0] for line in HELP) + 16
+            panel = pygame.Surface((wide, 20 * len(HELP) + 8), pygame.SRCALPHA)
             panel.fill((0, 0, 0, 165))
             self.screen.blit(panel, (8, y - 4))
             for i, line in enumerate(HELP):
