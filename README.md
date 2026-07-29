@@ -255,11 +255,20 @@ spill point. The erosion stage has already accumulated that field and its
 caller was discarding it, so the test costs nothing.
 
 The trade is that basins whose outflow is under the bar keep their water
-instead of being drained: on seed 7 at 384x288, 9 lakes become 45, and lake
-area goes from 0.3% of the map to 1.0%. Land area and river count are
-unchanged. They read as small tarns rather than as speckle, and it is the
-consistent answer - a basin too small to feed a river is too small to cut a
-gorge either.
+instead of being drained, which needed `lake_min_area` raised from 6 cells to
+30 to stay tidy. The extra survivors are puddles, and a puddle sitting on a
+river's course cuts the channel in two: lakes and rivers have their own
+colours, so three cells of lake blue in the middle of a river reads as a break
+in it rather than as a pond. At 384x288 that was 18-19 interrupted channels a
+map across seeds; at 30 cells it is none, on every seed and size tried, and
+the largest lake is untouched. Being an area, the cutoff scales with the
+square of map size, so it means the same lake at any resolution.
+
+Rivers are also clipped to land. The raster overruns the shoreline both ways -
+a mouth is a disc of channel width centred on the last path point, half of it
+in the sea - and once sea, lake and river each had a colour, the overrun drew
+a stripe of the wrong blue across the water. The clip happens after the
+incision, so the bed is still cut right up to the shore.
 
 Rivers are traced out of the D8 network as head-to-mouth paths, smoothed to
 shed the eight-direction staircase, then displaced sideways by 1-D noise along

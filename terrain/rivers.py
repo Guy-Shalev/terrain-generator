@@ -311,5 +311,15 @@ def build(h, cfg, rng, sea_level=0.0, routed=None):
     cut = grid.blur(cut, 0.7) * (h > sea_level) * (lake_id == 0)
     h = h - cut
 
+    # A river is a land feature, so it stops at the water's edge. The raster
+    # runs past it in both directions - a mouth is a disc of channel width
+    # centred on the last path point, half of which lands in the sea, and a
+    # path into a lake is traced to the shore and then painted over the water.
+    # Nothing downstream cared until the three got their own colours; now the
+    # overrun draws a stripe of the wrong blue across the sea and every lake it
+    # feeds. Masked after the incision, which already excluded both and should
+    # keep cutting the bed right up to the shoreline.
+    width = width * ((h > sea_level) & (lake_id == 0))
+
     return h, Water(filled=filled, flow=flow, receivers=rec, lake_id=lake_id,
                     lake_level=level, lake_depth=depth, width=width, polylines=paths)

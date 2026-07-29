@@ -118,7 +118,7 @@ class Config:
 
     # --- lakes and rivers ---
     lake_min_depth: float = 4e-3    # shallower closed basins are just wet ground
-    lake_min_area: int = 6          # cells
+    lake_min_area: int = 30         # cells; below this a basin is wet ground
     outlet_carve_passes: int = 2
     outlet_carve_depth: float = 0.012   # notch cut into a lake's pour point
     outlet_carve_slope: float = 6e-4    # gradient of the carved outflow channel
