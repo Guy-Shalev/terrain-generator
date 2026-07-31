@@ -34,7 +34,8 @@ python test_terrain.py       # invariant checks
 | texture | `terrain/elevation.py` | warped ridged fBm, amplitude weighted by local relief and tectonic activity |
 | coastline | `terrain/elevation.py` | sea level by quantile, a bounded rise per cell away from the shore, slope-compensated fray and drowned inlets on continent-ocean margins, then noise frays the shoreline |
 | erosion | `terrain/hydrology.py` | thermal creep, depression filling, D8 routing, flow accumulation, stream-power incision, repeated |
-| lakes and rivers | `terrain/rivers.py` | lake surface levelling, outlet carving, polyline extraction, meandering, discharge-based width, channel incision |
+| climate | `terrain/climate.py` | zonal rain belts, moisture marched downwind for orographic shadows, runoff and evaporation fields |
+| lakes and rivers | `terrain/rivers.py` | lake water balance, outlet carving, polyline extraction, meandering, discharge-based width, channel incision |
 
 Boundary type is never assigned by hand. The velocity field is constant inside
 each plate, so its derivatives are non-zero only where plates meet: negative
@@ -67,8 +68,8 @@ raising either leaves fewer. The sliders carry a divisor instead, counting
 upwards the way a reader expects, with 6 reproducing the config defaults.
 Measured at 320x240: rivers 28 / 83 / 462 at slider 2 / 6 / 30 and lakes
 0 / 10 / 16 at 1 / 6 / 30, each moving its own target and leaving the other
-alone. Channel width (`river_width`, and `river_width_max` which caps it) and
-meander amplitude (`meander_amp`) stay config-only.
+alone. Channel width (`river_width`, and `river_width_max` which caps it),
+meander amplitude (`meander_amp`) and the whole climate group stay config-only.
 
 Sea level is a quantile of the elevation field, so the whole land range works
 and the result lands within a point or so of the setting; 0 and 100 are
@@ -79,8 +80,10 @@ roughly 0.4 s at 256x192, 2.4 s at 512x384, 7 s at 768x576 and 18 s at 1024x768.
 viewer paints on the banner while it works.
 
 Layers: relief, elevation without water, tectonic relief (pre-texture),
-pre-erosion, plates, boundary classes, stress, drainage, erosion delta, slope,
-land/coast, river width.
+pre-erosion, plates, boundary classes, stress, rainfall, drainage, erosion
+delta, slope, land/coast, river width. The rainfall layer is ranked within the
+land distribution rather than scaled by it - rain is skewed enough that a linear
+ramp paints every interior the same tan.
 
 Three separate fields would otherwise trace the plate partition and give it
 away even after the strain gating: the plate boundary itself, the crust step
@@ -231,32 +234,136 @@ world = generate(seed=12, n_plates=9, land_fraction=0.4, collision_h=1.8)
 ```
 
 `world.height` is the final elevation with sea level at 0.0; `world.flow` is
-drainage area in cells; `world.rivers` and `world.lakes` are masks;
-`world.tect` holds every plate field and `world.water` every water field.
+drainage area weighted by runoff, so still in cells on average; `world.runoff`
+is that weight; `world.rivers` and `world.lakes` are masks; `world.tect` holds
+every plate field and `world.water` every water field, including the per-node
+`widths` of each polyline.
+
+## Climate
+
+Rain sets two things: how much water each cell contributes to the network, and
+how hard a lake has to work to stay wet. Both come out of one small model.
+
+Zonal belts give the latitudes - wet on the equator, dry in the horse
+latitudes, wet again at the storm tracks, dry at the poles, as
+`cos(3 pi lat)` - and the latitude they key on wobbles, the same trick the
+polar taper uses, so they do not read as three ruler-straight stripes.
+The belt scales the whole rain rate rather than its flat part: applied only to
+`rain_base` it is invisible wherever there is relief, because the orographic
+term is several times the base on any real slope.
+
+Then moisture is marched downwind, one column at a time. Winds are zonal -
+easterly in the tropics and at the poles, westerly between - so the march runs
+along rows and the two groups are done in opposite directions. A parcel drops
+`rain_base` of what it carries every land cell and `rain_orog` per unit of
+upwind climb, takes moisture back up over the sea, and gets `rain_recycle` of
+each fall handed straight back over land. The world is a cylinder, so there is
+no upwind edge to start dry at: the first lap is thrown away and only the
+moisture it leaves behind is kept.
+
+That recycling term is not decoration. Without it the loss inland is a pure
+exponential, and at rates that give a decent shadow half of every landmass came
+out under a seventh of the mean with its rivers gone. With it, at 384x288 over
+four seeds, land runoff runs 0.25 at the 5th percentile, 0.74 at the median and
+2.7 at the 95th, and the windward side of a range gets **2.5 to 3.6 times** what
+its lee does.
+
+The field is normalised to average one over land, which is what lets it drop
+into `hydrology.accumulate` as weights without moving what `river_threshold`
+means - drainage area was already that field with every weight at one. Rivers
+are drawn from the weighted flow, so they thin and vanish in a rain shadow.
+Erosion still runs on unweighted flow: wet slopes ought to carve faster, but
+that is a change to every tuned number in the erosion stage rather than a
+change to this one.
+
+Evaporation is `lake_evap` divided by the local runoff, floored at
+`rain_evap_cap`, so the same basin is a full lake in a wet belt and a pan in a
+shadow. Over six seeds at 384x288, of 54 basins:
+
+| | basins | mean flooded fraction | terminal |
+|---|---|---|---|
+| dry ground (runoff < 0.6) | 34 | 0.44 | 88% |
+| wet ground (runoff >= 0.6) | 20 | 0.82 | 55% |
 
 ## Lakes and rivers
 
-Every closed basin gets one flat surface at its spill elevation, with a depth
-field beneath it, so lakes read as sheets of water rather than as dimples in the
-terrain. Each lake's pour point is then notched and a channel is carved
+A lake holds the water surface its own catchment can keep, not the one its rim
+allows. In steady state a lake loses `lake_evap` per cell of water surface and
+gains its inflow, so it settles at an area of inflow / `lake_evap` - and with
+the basin's bed heights sorted, that area *is* the level: wet `k` cells and the
+surface stands at the k-th lowest bed in the basin. Three outcomes fall out of
+one rule. A basin whose inflow covers its whole spill area fills to the rim and
+spills the surplus. One that cannot sits part full and **spills nothing at
+all** - a terminal lake, with no river below it and no gorge cut for one. One
+whose inflow only just clears its floor is a pond in a wide hollow.
+
+`lake_evap` is aridity, in units of what a land cell sheds as runoff: open water
+loses `E/P` of the local rainfall while land yields only about a third of it, so
+the knob is `(E/P - 1) / 0.3` and the default 3.0 is a semi-arid world. 0
+reproduces the old fill-to-the-rim behaviour exactly. It is a ratio of areas, so
+it needs no scaling with map size. Measured over six seeds at 384x288, out of
+27-79 basins:
+
+| `lake_evap` | terminal | part full | lake cells/map |
+|---|---|---|---|
+| 0 | 0 | 0 | 510 |
+| 1.5 | 0 | 0 | 522 |
+| 3 | 7 | 7 | 694 |
+| 6 | 30 | 29 | 760 |
+| 12 | 60 | 60 | 533 |
+
+Below about 2 nothing changes on this terrain, because basin inflow per basin
+cell bottoms out around 2.6 - the balance can only bite where a basin is wide
+against the catchment feeding it. Note that the water *rises* between 0 and 6:
+a lake that stops spilling is also a lake nothing carves an outlet out of, so it
+keeps a basin the old code would have drained. Nothing goes completely dry at
+any setting, because a basin catches at least its own footprint and so never
+falls below `cells / lake_evap` of area. Playas need evaporation to outrun the
+rain locally, which is a spatial field rather than this scalar; the hook for one
+is the `weights` argument of `hydrology.accumulate`, which takes runoff per cell
+and is currently a uniform 1.
+
+A lake is also one *sheet* of water. The level is a contour, and the cells
+below it in a basin with any texture in its floor are not a connected set:
+a part-full lake drew as a spider of tendrils and specks along the whole basin
+rather than as a pond. Only the piece holding the basin's deepest cell is kept,
+which is what water standing at that level would actually cover.
+
+Each lake that still spills has its pour point notched and a channel carved
 downstream, which gives it a real outflow and a valley to drain through; filling
 and routing are redone afterwards because the surface changed. Some shallow
 basins drain away entirely at that point, which is the intended outcome.
 
-A gorge is only cut where the outflow clears `river_threshold` - the same bar a
-channel has to clear to be drawn as a river. Carving used to ignore it, and the
-two then disagreed: the gorge is real terrain, but with no river drawn in it a
-high threshold left dry trenches winding across the map. At 384x288 that was 1%
-of the dug cells at the default threshold and 30% at six times it, which is
-where it becomes obvious. Discharge at the pour point is the right test because
-it is exactly what would flow down the gorge, and it is measured on the
-*filled* surface, where a lake's whole catchment already routes through its
-spill point. The erosion stage has already accumulated that field and its
-caller was discarding it, so the test costs nothing.
+A gorge is only cut where the lake's outflow clears `river_threshold` - the same
+bar a channel has to clear to be drawn as a river. Carving used to ignore it,
+and the two then disagreed: the gorge is real terrain, but with no river drawn in
+it a high threshold left dry trenches winding across the map. At 384x288 that
+was 1% of the dug cells at the default threshold and 30% at six times it, which
+is where it becomes obvious. The outflow is the right test because it is exactly
+what would flow down the gorge - and for a terminal lake it is zero, so the
+whole question answers itself.
+
+The accumulation is *gated*, not run and then patched: each basin's cells are
+pointed at its exit so the entire inflow is finalised at one cell, and there the
+running total is replaced by the outflow the balance allows. Kahn's front is
+exactly the set of cells with nothing left upstream, so the gate fires once and
+sees everything. Water that a lake keeps therefore leaves the network, and the
+channels below a terminal lake come out dry rather than merely narrow.
+
+Two things about that are worth knowing. D8 does not already converge a basin on
+its exit - the fill's epsilon tilt drains a basin through the shallow rim strip
+that `lake_min_depth` leaves outside the label, so a labelled basin has 3 to 24
+cells whose receiver is not in it, and gating any one of them would see a
+fraction of the water. And because the rerouting is a shortcut across the basin
+floor, channels have to stop at the *basin* rather than at the water's edge:
+traced through the dry margin of a part-full lake, a path follows that shortcut
+and draws a ruler-straight river across the lake bed - one 14.6-cell step on
+seed 3 at 384x288, against 1.5 for every other path on the map.
 
 The trade is that basins whose outflow is under the bar keep their water
-instead of being drained, which needed `lake_min_area` raised from 6 cells to
-30 to stay tidy. The extra survivors are puddles, and a puddle sitting on a
+instead of being drained - which the balance makes commoner, since it is what
+takes a lake's outflow to zero - and that needed `lake_min_area` raised from 6
+cells to 30 to stay tidy. The extra survivors are puddles, and a puddle sitting on a
 river's course cuts the channel in two: lakes and rivers have their own
 colours, so three cells of lake blue in the middle of a river reads as a break
 in it rather than as a pond. At 384x288 that was 18-19 interrupted channels a
@@ -277,6 +384,14 @@ both ends so tributaries stay attached to their trunk. Width comes from
 discharge, as `river_width` times drainage area to `river_width_exp`, and the
 bed is incised under the finished channel.
 
+Width is measured against `river_width_ref`, a fixed fraction of the map, and
+never against `river_threshold`. The threshold is the "how many rivers" slider,
+and dividing by it coupled the two: asking for more rivers made *every* river
+wider, so at the top of the slider the whole network saturated at
+`river_width_max` and drew as a mat of equally fat channels with no trunk in it.
+At 512x384 with the slider at 30, the widest channel goes from 4.0 - the cap,
+flat across the top of the network - to 2.6, and the median from 1.6 to 0.8.
+
 That exponent is 0.45 rather than the classic half, which holds the trunks in
 without touching the headwaters - at 512x384 the widest channel goes from 3.89
 cells to 3.34 while the median stays on the 0.7 floor. It is the right lever
@@ -286,19 +401,29 @@ and lowering `river_width` narrows the mid-sized channels along with the big
 ones.
 
 `world.water` holds it all: `lake_id`, `lake_level`, `lake_depth`, `width`,
-`polylines`, plus `flow` and `receivers`. `world.surface` returns the water
+`polylines`, `widths`, plus `flow` and `receivers`. `world.surface` returns the water
 surface where there is water and the bed everywhere else, which is what the
 relief layer hillshades so lakes come out flat.
 
 ## Not done yet
 
-No climate, biomes, or anything human-made. Lake outflow is carved, not
-simulated - lake levels do not respond to a water balance, and a river cannot
-change course after the fact.
+No biomes, no temperature, nothing human-made. Rain is modelled but only feeds
+the water: erosion still runs on unweighted flow, so a soaked windward slope
+carves no faster than the desert behind it. Nothing goes fully dry either - a
+basin catches at least its own footprint, so playas need evaporation to beat the
+rain locally rather than a lake-surface rate that is merely high. Lake outflow is
+carved rather than simulated: the level responds to a water balance now, the
+channel it spills through does not, and a river cannot change course after the
+fact. Meanders are noise, not migration: curvature-driven migration with neck
+cutoffs and oxbow lakes was built and reverted, because at any rate that made
+the bends visible the map read as wrigglier than the noise does and the migrated
+channels wandered far enough off their D8 course to sit oddly in their valleys.
+Worth another attempt only with a topographic term holding a channel to its own
+valley floor, in place of the blunt cap on lateral drift that version used.
 
-Cost is roughly 0.35 s at 256x192, 1.8 s at 512x384 and 14 s at 1024x768, and
-varies by 30-40% run to run on the same machine. Erosion is about half of it
-and the river stage most of the rest.
+Cost is roughly 0.5 s at 256x192, 2.3 s at 512x384 and 16 s at 1024x768, and
+varies by 30-40% run to run on the same machine. Erosion is about half of it and
+the river stage most of the rest; climate is about 2% of it.
 
 The large sizes used to be far worse (59 s at 1024x768). Seven changes, none of
 which alter the output - the fill, the accumulation, the halo and the handed-in

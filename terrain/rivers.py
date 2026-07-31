@@ -2,11 +2,13 @@
 
 Four things happen here, in order, because each depends on the last:
 
-    lake levelling   every closed basin gets one flat water surface at its
-                     spill elevation, and a depth field under it
-    outlet carving   the pour point of each lake is notched and a channel is
-                     cut downstream, so the lake actually has an outflow and
-                     the terrain shows the gorge it drains through
+    water balance    every closed basin holds the water surface its own
+                     catchment can keep against evaporation - its spill level if
+                     there is plenty, a smaller sheet with no outflow at all if
+                     there is not - and a depth field under it
+    outlet carving   the pour point of each lake that still spills is notched
+                     and a channel cut downstream, so the lake has an outflow
+                     and the terrain shows the gorge it drains through
     polylines        the D8 network is traced into head-to-mouth paths and
                      smoothed, which removes the eight-direction staircase
     meander + width  each path is displaced sideways by noise along its own
@@ -15,6 +17,7 @@ Four things happen here, in order, because each depends on the last:
 
 Carving changes the surface, so filling and routing are redone after it.
 """
+from collections import namedtuple
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -33,6 +36,7 @@ class Water:
     lake_depth: np.ndarray    # level - bed
     width: np.ndarray         # river width in cells, 0 where there is no river
     polylines: list = field(default_factory=list)   # (n, 2) arrays of (y, x)
+    widths: list = field(default_factory=list)      # channel width per path node
 
     @property
     def lake_mask(self):
@@ -65,20 +69,119 @@ def _label_lakes(h, filled, cfg, sea_level=0.0):
     return remap[lbl], int(remap.max())
 
 
-def _levels(lbl, n, filled):
-    """One elevation per lake: the lowest fill value in it, i.e. its spill point.
+_Routed = namedtuple("_Routed", "filled rec flow lake_id n level outflow")
 
-    Planchon-Darboux leaves a tiny epsilon gradient across a filled basin, so
-    taking the minimum recovers the flat surface the water would actually sit at.
+
+def _lake_balance(h, filled, rec, lbl, n, cfg, evap=None):
+    """Give each lake the water surface its catchment can hold, not its rim.
+
+    A lake in steady state loses `lake_evap` per cell of water surface and gains
+    its inflow, so the area it settles at is inflow / evaporation - independent
+    of how deep the basin happens to be. Sort a basin's bed heights and that
+    area names the level directly: with `k` cells wet, the surface stands at the
+    k-th lowest bed in the basin. A basin whose inflow covers its whole spill
+    area fills to the rim and spills the surplus, as before; one that cannot
+    sits part full with **no outflow at all**.
+
+    That second case is why the accumulation has to be gated rather than run and
+    then patched: a lake that keeps its water is the end of the line, and the
+    channel below it has to come out dry, not merely narrow.
+
+    Under uniform rain a basin cannot go *completely* dry: it catches at least
+    its own footprint, so its area never falls below `cells / lake_evap`. Playas
+    need evaporation to outrun the rain locally, which is a spatial field, not
+    this scalar - see `accumulate`'s `weights`.
+
+    Returns `(rec, gate, level, outflow)`. Every cell of the basin is pointed at
+    its exit, the lowest cell of the filled surface within it, so the whole
+    inflow is finalised at one gate cell. That is not where D8 already sends it:
+    the fill's epsilon tilt drains a basin through the shallow rim strip that
+    `lake_min_depth` leaves *outside* the label, so a labelled basin has 3 to 24
+    cells whose receiver is not in it (measured over 30 basins on six seeds) and
+    gating any one of them would see a fraction of the water. The exit is
+    strictly below every cell now pointed at it, so the graph stays acyclic.
+
+    ponytail: the wet cells are the k lowest in the basin, which need not be
+    connected - a basin with two hollows in it can come out as two ponds under
+    one id. Fine as long as lakes are drawn from a mask; walk the hypsometry per
+    connected component if a lake ever needs its own outline.
     """
-    level = np.zeros(lbl.shape)
-    if n:
-        per = ndimage.minimum(filled, lbl, index=np.arange(1, n + 1))
-        level = np.concatenate([[0.0], np.atleast_1d(per)])[lbl]
-    return level
+    idx = np.arange(1, n + 1)
+    cells = np.flatnonzero(lbl.ravel() > 0)
+    ids = lbl.ravel()[cells]
+    # Grouped by lake and rising within each group, so the k-th entry of a
+    # group is exactly the level that wets k of its cells.
+    order = np.lexsort((h.ravel()[cells], ids))
+    cells, ids = cells[order], ids[order]
+    beds = h.ravel()[cells]
+    bounds = np.searchsorted(ids, np.arange(1, n + 2))    # lake i is [i-1:i]
+    spill = np.concatenate([[0.0], np.atleast_1d(
+        ndimage.minimum(filled, lbl, index=idx))])
+
+    pos = np.atleast_2d(ndimage.minimum_position(filled, lbl, index=idx))
+    exits = np.zeros(n + 1, int)
+    exits[1:] = pos[:, 0] * h.shape[1] + pos[:, 1]
+
+    rec = rec.copy()
+    rf = rec.ravel()
+    tgt = exits[ids]
+    move = cells != tgt
+    rf[cells[move]] = tgt[move]
+
+    level, outflow = np.zeros(n + 1), np.zeros(n + 1)
+    # One evaporation rate per lake, averaged over its own surface: the same
+    # basin is a full lake in a wet belt and a salt pan in a rain shadow.
+    per = np.zeros(n + 1)
+    per[1:] = (float(cfg.lake_evap) if evap is None
+               else np.atleast_1d(ndimage.mean(evap, lbl, index=idx)))
+
+    def gate(cell, inflow):
+        lake = lbl.ravel()[cell]
+        beg, size = bounds[lake - 1], bounds[lake] - bounds[lake - 1]
+        ev = per[lake]
+        wet = np.where(ev <= 0, size,
+                       np.minimum((inflow / np.maximum(ev, 1e-9)).astype(int), size))
+        full = wet >= size
+        level[lake] = np.where(full, spill[lake],
+                               beds[beg + np.minimum(wet, size - 1)])
+        outflow[lake] = np.where(full, np.maximum(inflow - ev * size, 0.0), 0.0)
+        return outflow[lake]
+
+    mask = np.zeros(h.size, bool)
+    mask[exits[1:]] = True
+    return rec, (mask, gate), level, outflow
 
 
-def carve_outlets(h, cfg, sea_level=0.0, routed=None):
+def _route_water(h, cfg, sea_level=0.0, filled=None, rec=None,
+                 runoff=None, evap=None):
+    """Fill, route, label lakes, and accumulate under each lake's water balance.
+
+    One helper for both halves of this stage: carving needs to know which lakes
+    still spill and how hard, and the finished map needs the same answer plus
+    the surfaces themselves.
+
+    `runoff` is water contributed per cell and `evap` what a cell of lake
+    surface loses, both from `climate`; left out, every cell contributes one and
+    every lake evaporates `lake_evap`, which is the uniform-rain world.
+
+    `filled` and `rec` may be handed in when they are already known for exactly
+    this surface. The drainage area cannot be, because it is the thing the
+    balance changes.
+    """
+    if filled is None:
+        filled = hydrology.fill_depressions(h, sea_level)
+    if rec is None:
+        rec, _, _ = hydrology.flow_routing(filled)
+    lbl, n = _label_lakes(h, filled, cfg, sea_level)
+    if n == 0:
+        flow = hydrology.accumulate(filled, rec, weights=runoff)
+        return _Routed(filled, rec, flow, lbl, 0, np.zeros(1), np.zeros(1))
+    rec, gate, level, outflow = _lake_balance(h, filled, rec, lbl, n, cfg, evap)
+    flow = hydrology.accumulate(filled, rec, weights=runoff, gate=gate)
+    return _Routed(filled, rec, flow, lbl, n, level, outflow)
+
+
+def carve_outlets(h, cfg, sea_level=0.0, routed=None, runoff=None, evap=None):
     """Notch each lake's pour point and cut a channel downstream from it.
 
     Without this a basin fills to its rim and the water has no modelled way
@@ -89,36 +192,27 @@ def carve_outlets(h, cfg, sea_level=0.0, routed=None):
     disagree: the gorge is real terrain but no river is drawn in it, so a very
     high threshold leaves dry trenches winding across the map with no water in
     them. At 384x288 that is 1% of the dug cells at the default threshold and
-    30% at six times it. Discharge at the pour point is the right test because
-    it is exactly what would flow down the gorge - and it is measured on the
-    *filled* surface, where the lake's whole catchment already routes through
-    its spill point.
+    30% at six times it. The lake's own outflow is the right test because it is
+    exactly what would flow down the gorge - and under a water balance it is
+    zero for a lake that keeps everything reaching it, so such a lake gets no
+    gorge and no river below it.
 
     `routed` is an optional (filled, receivers, drainage area) already computed
     for `h` as it arrives. The erosion stage finishes by filling, routing and
     accumulating the very surface handed here and its caller throws that away,
-    so the first pass would otherwise redo it - a third of a second at
-    1024x768. The fill and routing are used once and dropped, because after the
-    first notch the surface is no longer the one they describe; the drainage
-    area is kept for every pass, since carving deepens channels without moving
-    the catchments that feed them.
+    so the first pass would otherwise redo the fill and the routing - the
+    expensive two thirds of it. Only those two are taken: the drainage area is
+    recomputed because the balance gates it, and it is recomputed every pass
+    because draining a lake changes which lakes there are.
     """
     thresh = cfg.river_threshold * h.size
-    flow = None
     for _ in range(cfg.outlet_carve_passes):
-        if routed is not None:
-            filled, rec, flow = routed
-            routed = None
-        else:
-            filled = hydrology.fill_depressions(h, sea_level)
-            rec = None
-        lbl, n = _label_lakes(h, filled, cfg, sea_level)
+        known = routed[:2] if routed is not None else (None, None)
+        routed = None
+        r = _route_water(h, cfg, sea_level, *known, runoff=runoff, evap=evap)
+        lbl, n = r.lake_id, r.n
         if n == 0:
             break
-        if rec is None:
-            rec, _, _ = hydrology.flow_routing(filled)
-        if flow is None:
-            flow = hydrology.accumulate(filled, rec)
 
         # Rim = cells just outside a lake. The lowest one is where it spills.
         rim = np.zeros_like(lbl)
@@ -131,10 +225,10 @@ def carve_outlets(h, cfg, sea_level=0.0, routed=None):
         idx = np.arange(1, n + 1)
         pours = ndimage.minimum_position(h, rim, index=idx)
 
-        flat, recf, flowf = h.ravel(), rec.ravel(), flow.ravel()
-        for pos in np.atleast_2d(pours):
+        flat, recf = h.ravel(), r.rec.ravel()
+        for lake, pos in enumerate(np.atleast_2d(pours), start=1):
             c = int(pos[0]) * h.shape[1] + int(pos[1])
-            if flowf[c] < thresh:   # too little water to cut, or to draw
+            if r.outflow[lake] < thresh:   # too little water to cut, or to draw
                 continue
             cur = flat[c] - cfg.outlet_carve_depth
             for _ in range(cfg.outlet_carve_len):
@@ -222,6 +316,14 @@ def meander(pts, width, cfg, rng):
     Amplitude grows with width because real meander belts scale with the
     channel; the taper keeps the head and the junction/mouth pinned in place so
     tributaries still meet their trunk.
+
+    Curvature-driven migration replaced this for a while - Howard and Knutson's
+    model, bends leaning and crawling downstream, with neck cutoffs leaving
+    oxbow lakes. It was reverted: at any rate that made the bends visible the
+    map read as wrigglier than this does, and the migrated channels wandered far
+    enough from the D8 course they were traced from to sit oddly in their
+    valleys. Worth another attempt only with a topographic term holding the
+    channel to its valley floor, rather than the blunt corridor cap it used.
     """
     n = len(pts)
     if n < 6:
@@ -272,23 +374,56 @@ def rasterize(paths, widths, shape):
 # --------------------------------------------------------------------------
 
 
-def build(h, cfg, rng, sea_level=0.0, routed=None):
+def build(h, cfg, rng, sea_level=0.0, routed=None, runoff=None, evap=None):
     """Run the whole stage. Returns (incised height, Water).
 
     `routed` is (filled, receivers, drainage area) and goes straight to
-    `carve_outlets`; see its note.
+    `carve_outlets`; see its note. `runoff` and `evap` come from `climate` and
+    are what make one basin a lake and its neighbour in a rain shadow a pan.
     """
-    h = carve_outlets(h, cfg, sea_level, routed)
+    h = carve_outlets(h, cfg, sea_level, routed, runoff, evap)
 
-    filled = hydrology.fill_depressions(h, sea_level)
-    rec, _, _ = hydrology.flow_routing(filled)
-    flow = hydrology.accumulate(filled, rec)
-    lake_id, n_lakes = _label_lakes(h, filled, cfg, sea_level)
-    level = _levels(lake_id, n_lakes, filled)
-    depth = np.where(lake_id > 0, np.maximum(level - h, 0.0), 0.0)
+    r = _route_water(h, cfg, sea_level, runoff=runoff, evap=evap)
+    filled, rec, flow = r.filled, r.rec, r.flow
+    level = r.level[r.lake_id]
+    depth = np.where(r.lake_id > 0, np.maximum(level - h, 0.0), 0.0)
+    # A lake covers what its water reaches, not the basin holding it: under a
+    # balance a basin can stand well below its spill point, and one whose inflow
+    # all evaporates holds nothing. Renumber so the basins that came out dry
+    # leave no gaps behind - a caller counting lakes off `lake_id.max()` would
+    # otherwise ask about ids that no longer exist.
+    lake_id = r.lake_id * (depth > 0)
+    # One sheet of water, not the k lowest cells wherever they happen to lie.
+    # The level is a contour, and a contour through a basin with any texture in
+    # its floor picks out tendrils and specks along the whole of it: a
+    # part-full lake drew as a spider rather than a pond. Keep the piece holding
+    # the deepest cell of each basin and drop the rest, which is what a lake
+    # standing at that level would actually cover.
+    if lake_id.any():
+        piece, npieces = ndimage.label(lake_id > 0, structure=np.ones((3, 3)))
+        if npieces > 1:
+            keep_piece = np.zeros(npieces + 1, bool)
+            deep = ndimage.maximum_position(depth, r.lake_id,
+                                            index=np.arange(1, r.n + 1))
+            for pos in np.atleast_2d(deep):
+                keep_piece[piece[int(pos[0]), int(pos[1])]] = True
+            keep_piece[0] = False
+            lake_id = lake_id * keep_piece[piece]
+    depth = np.where(lake_id > 0, depth, 0.0)
+    keep = np.zeros(r.n + 1, bool)
+    keep[np.unique(lake_id)] = True
+    keep[0] = False
+    lake_id = (np.cumsum(keep) * keep)[lake_id]
+    level = np.where(lake_id > 0, level, 0.0)
 
     thresh = cfg.river_threshold * h.size
-    channel = (flow >= thresh) & (h > sea_level) & (lake_id == 0)
+    # Channels stop at the *basin*, not at the water's edge. Every cell of a
+    # basin is routed to its exit so the balance sees one inflow, and a path
+    # traced through the dry margin of a part-full lake would follow that
+    # shortcut - drawing a ruler-straight river a dozen cells long across the
+    # lake bed. Measured on seed 3 at 384x288: one 14.6-cell step, against 1.5
+    # for every other path on the map.
+    channel = (flow >= thresh) & (h > sea_level) & (r.lake_id == 0)
     # The top and bottom rows are drainage outlets, so water pools along them
     # and draws a ruler-straight river down the map edge. Cut them out.
     channel[:2] = channel[-2:] = False
@@ -302,11 +437,18 @@ def build(h, cfg, rng, sea_level=0.0, routed=None):
         # Capping instead only bites on the top percentile and flattens all of
         # it to one width, and lowering `river_width` narrows the mid-sized
         # channels along with the big ones.
-        wv = np.clip(cfg.river_width * (q / thresh) ** cfg.river_width_exp,
+        #
+        # Measured against `river_width_ref`, never against `river_threshold`.
+        # The threshold is the "how many rivers" slider, and dividing by it
+        # coupled the two: asking for more rivers made *every* river wider, so
+        # at the top of the slider the whole network saturated at
+        # `river_width_max` and drew as a mat of equally fat channels rather
+        # than as a network with a trunk in it. Discharge is discharge.
+        wv = np.clip(cfg.river_width *
+                     (q / (cfg.river_width_ref * h.size)) ** cfg.river_width_exp,
                      0.7, cfg.river_width_max)
         pts = _unwrap_x(pts, h.shape[1])
-        pts = meander(_smooth(pts), wv, cfg, rng)
-        paths.append(pts)
+        paths.append(meander(_smooth(pts), wv, cfg, rng))
         widths.append(wv)
 
     width = rasterize(paths, widths, h.shape)
@@ -316,6 +458,7 @@ def build(h, cfg, rng, sea_level=0.0, routed=None):
     cut = cfg.river_incision * np.clip(width / max(1e-6, cfg.river_width_max), 0, 1) ** 0.5
     cut = grid.blur(cut, 0.7) * (h > sea_level) * (lake_id == 0)
     h = h - cut
+
 
     # A river is a land feature, so it stops at the water's edge. The raster
     # runs past it in both directions - a mouth is a disc of channel width
@@ -328,4 +471,5 @@ def build(h, cfg, rng, sea_level=0.0, routed=None):
     width = width * ((h > sea_level) & (lake_id == 0))
 
     return h, Water(filled=filled, flow=flow, receivers=rec, lake_id=lake_id,
-                    lake_level=level, lake_depth=depth, width=width, polylines=paths)
+                    lake_level=level, lake_depth=depth, width=width, polylines=paths,
+                    widths=widths)

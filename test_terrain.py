@@ -3,7 +3,7 @@ import numpy as np
 from scipy import ndimage
 
 from terrain import Config, generate
-from terrain import grid, hydrology, noise, render, rivers, world
+from terrain import climate, grid, hydrology, noise, render, rivers, world
 
 
 def test_grid_wraps():
@@ -107,18 +107,135 @@ def test_accumulate_matches_ordered_walk():
 
 
 def test_outlet_carving_drains_basins():
-    """Carving must remove impounded volume, never add it."""
+    """Carving must remove impounded volume, never add it.
+
+    The slab drains one way and the basin sits low on it, so the basin has a
+    catchment several times its own area and spills. That is the case carving is
+    for: a basin whose inflow all evaporates has no outflow to cut a gorge with,
+    and `test_lake_water_balance` covers that one.
+    """
     cfg = Config(width=96, height=96, seed=4)
     rng = np.random.default_rng(4)
     y, x = np.mgrid[0:96, 0:96]
-    h = 0.4 - 0.004 * np.hypot(y - 48, x - 48) + 0.05 * rng.normal(0, 1, (96, 96))
+    h = 0.6 - 0.004 * y + 0.05 * rng.normal(0, 1, (96, 96))
     h = grid.blur(h, 3)
-    h[36:60, 36:60] -= 0.12  # a basin with no way out
+    h[60:76, 36:60] -= 0.12  # a basin with no way out, and well above sea level
     before = (hydrology.fill_depressions(h) - h).sum()
     after_h = rivers.carve_outlets(h.copy(), cfg)
     after = (hydrology.fill_depressions(after_h) - after_h).sum()
     assert after < before, f"carving did not drain anything: {before} -> {after}"
     assert (after_h <= h + 1e-12).all(), "carving may only lower the surface"
+
+
+def test_rain_shadow_and_normalisation():
+    """Rain must fall on the windward side, and average one unit over land.
+
+    The average is what lets `runoff` drop into `accumulate` as weights without
+    moving `river_threshold`, which counts cells. The shadow is the whole point
+    of marching moisture instead of reading a latitude off the row index.
+    """
+    h = np.full((120, 240), -0.4)
+    h[:, 80:160] = 0.05                      # a continent
+    ridge = np.exp(-((np.arange(240) - 110) / 6.0) ** 2)
+    h[:, :] += 0.9 * ridge[None, :] * (h > 0)
+    cfg = Config(width=240, height=120, ref_width=240, rain_belts=0.0)
+    ro, evap = climate.runoff(h, cfg, np.random.default_rng(0))
+    land = h > 0
+    assert abs(ro[land].mean() - 1.0) < 1e-9, "runoff is not normalised"
+    assert (ro[~land] == 0).all(), "the sea contributes runoff"
+    # Mid-latitudes blow west to east, so for those rows the far side of the
+    # ridge is the dry one; the tropics and poles blow the other way.
+    lat = np.abs(np.arange(120) / 119 * 2 - 1)
+    west = (lat > 1 / 3) & (lat < 2 / 3)
+    up, lee = ro[west, 95:108].mean(), ro[west, 113:126].mean()
+    assert up > 2 * lee, f"no rain shadow: windward {up:.2f} vs lee {lee:.2f}"
+    assert ro[~west, 113:126].mean() > ro[~west, 95:108].mean(), \
+        "the easterly bands shadow the same side as the westerlies"
+    # Aridity is what a lake has to survive, so it must run the other way.
+    assert evap[land][ro[land] < 0.5].mean() > evap[land][ro[land] > 1.5].mean()
+
+
+def test_rain_belts():
+    """The zonal bands must dry the horse latitudes and not the equator.
+
+    Flat land, so nothing but the belts can vary the rain - but with an ocean
+    either side of it, because the bands only show against something that
+    resupplies the air. On an all-land world the two even out: a dry belt rains
+    less and so keeps more moisture for the next cell, and after the field is
+    normalised the row means come back level to two decimal places.
+    """
+    h = np.full((180, 120), -0.4)
+    h[:, 40:80] = 0.05
+    kw = dict(width=120, height=180, ref_width=120, rain_wobble=0.0)
+    ro, _ = climate.runoff(h, Config(**kw), np.random.default_rng(0))
+    band = ro[:, 40:80].mean(axis=1)
+    # Row 90 is the equator; the horse latitudes are a third of the way out,
+    # which on 180 rows is row 60. Row 30 is 60 degrees - a wet belt, not a dry
+    # one - and picking it there gives two readings that match to the decimal.
+    eq, horse = band[88:92].mean(), band[58:62].mean()
+    assert eq > 1.4 * horse, f"belts are flat: equator {eq:.2f} vs 30 deg {horse:.2f}"
+    flat, _ = climate.runoff(h, Config(rain_belts=0.0, **kw),
+                             np.random.default_rng(0))
+    assert np.ptp(flat[:, 40:80].mean(axis=1)) < np.ptp(band), \
+        "rain_belts=0 is not flat"
+
+
+def _basin_world(shape=(96, 96), seed=4):
+    """A cone draining to the edges with one closed basin dug into it."""
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[0:shape[0], 0:shape[1]]
+    h = 0.4 - 0.004 * np.hypot(y - shape[0] / 2, x - shape[1] / 2)
+    h = grid.blur(h + 0.05 * rng.normal(0, 1, shape), 3)
+    h[36:60, 36:60] -= 0.12
+    return h
+
+
+def test_lake_water_balance():
+    """A lake holds what its catchment can keep, and keeps what it holds.
+
+    With no evaporation every basin fills to its rim and spills, which is the
+    old behaviour. With evaporation the same basin stands lower, stops spilling
+    once its whole inflow goes to the air, and the water that reached it does
+    not reappear downstream - the accumulation is gated, not patched afterwards.
+    """
+    h = _basin_world()
+    wet = lambda r: int(((r.lake_id > 0) & (r.level[r.lake_id] > h)).sum())
+    full = rivers._route_water(h, Config(width=96, height=96, lake_evap=0.0))
+    thin = rivers._route_water(h, Config(width=96, height=96, lake_evap=40.0))
+    assert full.n and thin.n, "no basin to balance"
+    assert wet(full) > wet(thin) > 0, f"{wet(full)} -> {wet(thin)} wet cells"
+    assert full.outflow.max() > 0, "a rim-full lake must spill"
+    assert thin.outflow.max() == 0, "an evaporating lake must not spill"
+    # Gating is the point: a lake that keeps its inflow removes it from the
+    # network, so less than one unit per cell can reach the sinks.
+    def to_sinks(r):
+        sinks = r.rec.ravel() == np.arange(h.size)
+        return r.flow.ravel()[sinks].sum()
+    assert abs(to_sinks(full) - h.size) < 1e-6, "nothing should be lost with no evaporation"
+    lost = to_sinks(full) - to_sinks(thin)
+    assert lost > 100, f"evaporation removed only {lost} cells of runoff"
+
+
+def test_lake_balance_leaves_no_cycles():
+    """Pointing a lake's cells at its exit must not make water circulate.
+
+    Every lake cell is rerouted to the lowest cell of its own filled surface so
+    the whole inflow arrives at one gate. That target is strictly below what it
+    receives from, which is what keeps the graph acyclic - and a cycle would not
+    raise anything, it would quietly drop the water going round it.
+    """
+    h = _basin_world((80, 112), seed=6)
+    r = rivers._route_water(h, Config(width=112, height=80, lake_evap=0.0))
+    rec = r.rec.ravel()
+    seen = np.zeros(h.size, bool)
+    for start in range(0, h.size, 7):       # every seventh cell, walked to a sink
+        c, steps = start, 0
+        while rec[c] != c:
+            c = rec[c]
+            steps += 1
+            assert steps <= h.size, f"receiver walk from {start} never ends"
+        seen[c] = True
+    assert seen.any()
 
 
 def test_lakes_and_rivers():
@@ -138,11 +255,12 @@ def test_lakes_and_rivers():
     assert wat.polylines, "no rivers traced"
     for pts in wat.polylines:
         assert len(pts) >= 3
-    # Discharge only grows downstream, so width must too.
-    for pts in wat.polylines:
-        q = wat.flow[np.clip(pts[:, 0].astype(int), 0, w.height.shape[0] - 1),
-                     pts[:, 1].astype(int) % w.height.shape[1]]
-        assert q[-1] >= q[0] * 0.5, "path is not running downstream"
+    # Discharge only grows downstream, so width must too. Read off the per-node
+    # widths rather than by sampling `flow` under the path: a migrated channel
+    # sits a few cells off the D8 line it was traced from, and sampling the grid
+    # there reads whatever drains that cell, not what the river carries.
+    for wv in wat.widths:
+        assert wv[-1] >= wv[0] * 0.9, "path is not running downstream"
     assert wat.river_mask.any()
     assert wat.width[wat.river_mask].min() > 0
     assert wat.width.max() <= w.cfg.river_width_max + 1e-9
@@ -151,6 +269,8 @@ def test_lakes_and_rivers():
 
 
 def test_meander_stays_attached():
+    """The swing must move the path and leave both ends exactly where they were,
+    or every tributary detaches from its trunk."""
     rng = np.random.default_rng(0)
     cfg = Config()
     pts = np.stack([np.arange(80.0), np.zeros(80)], axis=-1)

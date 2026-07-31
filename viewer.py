@@ -281,7 +281,8 @@ class Viewer:
                 elif d["river_w"] > 0:
                     extra = f"  river {d['river_w']:.1f} wide"
                 self.text(f"h {d['elev']:+.3f}  plate {d['plate']:>2} {d['crust'][:4]}"
-                          f"  bnd {d['dist_to_boundary']:.0f}px  flow {d['flow']:.0f}{extra}",
+                          f"  bnd {d['dist_to_boundary']:.0f}px  rain {d['rain']:.2f}"
+                          f"  flow {d['flow']:.0f}{extra}",
                           x, 6, (170, 210, 255))
         self.draw_sliders()
         if self.busy:

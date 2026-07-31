@@ -147,13 +147,20 @@ def flow_routing(filled):
     return rec, rec_d, best
 
 
-def accumulate(filled, rec, weights=None):
+def accumulate(filled, rec, weights=None, gate=None):
     """Drainage area: every cell's water, plus everything draining into it.
 
     Peeled a level at a time (Kahn's algorithm) rather than walked cell by cell
     in elevation order: same topological order requirement, but each level is
     one vectorised scatter instead of hundreds of thousands of interpreted
     steps. Both orders sum the same exact integer counts.
+
+    `gate` is `(mask, fn)`. A cell the mask selects has its total replaced by
+    `fn(indices, totals)` before that total moves downstream, which is how a
+    lake that evaporates what reaches it stops the river below it. The
+    replacement is applied the moment the cell is finalised - Kahn's front is
+    exactly the set of cells with nothing left upstream - so `fn` sees the
+    lake's whole inflow, and sees it once.
     """
     n = filled.size
     acc = np.ones(n) if weights is None else weights.ravel().astype(float).copy()
@@ -161,7 +168,14 @@ def accumulate(filled, rec, weights=None):
     flows = r != np.arange(n)              # false at sinks: sea, edges, pits
     indeg = np.bincount(r[flows], minlength=n)
     front = np.flatnonzero(indeg == 0)     # ridge cells, nothing upstream
+    gate_mask, gate_fn = gate if gate else (None, None)
     while front.size:
+        if gate_mask is not None:
+            # Before the sink filter: a gate on a pit still has to fire, or the
+            # lake sitting in it never gets told how much water arrived.
+            g = front[gate_mask[front]]
+            if g.size:
+                acc[g] = gate_fn(g, acc[g])
         front = front[flows[front]]
         if front.size == 0:
             break
@@ -194,12 +208,3 @@ def stream_power(h, sea_level=0.0, passes=4, k=0.06, m=0.5, n=1.0,
     rec, rec_d, _ = flow_routing(filled)
     acc = accumulate(filled, rec)
     return h, filled, acc, rec
-
-
-def lakes(h, filled, sea_level=0.0, tol=4e-3):
-    """Cells the filling had to raise are closed basins - lake candidates.
-
-    `tol` discards the pits that are only a rounding wrinkle deep, which would
-    otherwise speckle every plain with one-cell ponds.
-    """
-    return (filled - h > tol) & (h > sea_level)

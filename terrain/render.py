@@ -165,6 +165,22 @@ def flow(acc, h, threshold):
     return np.clip(base * (1 - strength) + water * strength, 0, 255).astype(np.uint8)
 
 
+RAIN_RAMP = [(0.0, (196, 172, 120)), (0.35, (176, 186, 120)),
+             (0.7, (96, 158, 108)), (1.0, (36, 96, 132))]
+
+
+def rain_map(w):
+    """Runoff per cell over a dim relief: tan is desert, blue-green is soaked."""
+    base = relief(w.height, shade=True) * 0.5
+    # Ranked within the land distribution, not scaled by it: rain is skewed
+    # enough - a wet coast is several times the median - that a linear ramp
+    # paints every interior the same tan and shows none of the structure in it.
+    v = _rank(w.runoff, w.runoff[w.land])
+    rain = _ramp(v, RAIN_RAMP)
+    return np.clip(np.where(w.land[..., None], rain * 0.72 + base * 0.5, base),
+                   0, 255).astype(np.uint8)
+
+
 def land_mask(h, lakes=None):
     rgb = np.where((h > 0)[..., None], np.array([232, 226, 208.0]),
                    np.array([28, 52, 84.0]))
@@ -196,6 +212,7 @@ LAYERS = [
     ("plates", lambda w: plates(w.tect, shade_height=w.height)),
     ("boundaries", lambda w: plates(w.tect, cls=_cls(w), shade_height=w.height)),
     ("stress", lambda w: stress(w.tect)),
+    ("rainfall", rain_map),
     ("drainage", lambda w: flow(w.flow, w.height, w.cfg.river_threshold * w.height.size)),
     ("erosion delta", lambda w: erosion_diff(w.height_pre, w.height_eroded)),
     ("slope", lambda w: slope_map(w.height)),

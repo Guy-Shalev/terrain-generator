@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, asdict, replace
 
 import numpy as np
 
-from . import elevation, hydrology, rivers, tectonics
+from . import climate, elevation, hydrology, rivers, tectonics
 
 
 @dataclass
@@ -116,9 +116,29 @@ class Config:
     thermal_iters: int = 12
     talus: float = 0.045
 
+    # --- climate ---
+    rain_base: float = 0.006        # moisture a land cell takes out of the air
+    rain_orog: float = 1.0          # extra rain per unit of upwind climb
+    rain_ocean_gain: float = 0.08   # moisture an ocean cell puts back
+    rain_belts: float = 0.75        # depth of the zonal wet/dry bands, 0 = flat
+    rain_wobble: float = 0.10       # how far the bands wander, in latitude
+    rain_wobble_periods: float = 2.0
+    rain_recycle: float = 0.55      # share of rain a land cell puts back up
+    rain_blur: float = 2.5          # px; weather is not one cell wide
+    rain_evap_cap: float = 0.2      # driest runoff `lake_evap` is divided by
+
     # --- lakes and rivers ---
     lake_min_depth: float = 4e-3    # shallower closed basins are just wet ground
     lake_min_area: int = 30         # cells; below this a basin is wet ground
+    # Runoff a cell of lake surface loses, in units of what a land cell yields;
+    # 0 fills every basin to its rim, as the generator used to. A lake settles
+    # at an area of inflow / this, so it is a ratio and needs no scaling with
+    # the map. 3 is about right physically - open water evaporates roughly the
+    # local rainfall while land sheds only a third of it as runoff - and lands
+    # where it should on this terrain: measured over three seeds at 384x288,
+    # basin inflow per basin cell runs 2-28 with a median near 6-13, so most
+    # basins still fill and spill while the widest, driest-fed ones do not.
+    lake_evap: float = 3.0
     outlet_carve_passes: int = 2
     outlet_carve_depth: float = 0.012   # notch cut into a lake's pour point
     outlet_carve_slope: float = 6e-4    # gradient of the carved outflow channel
@@ -127,6 +147,11 @@ class Config:
     river_width: float = 0.85           # channel width in cells at that threshold
     river_width_max: float = 4.0
     river_width_exp: float = 0.45       # width goes as discharge to this power
+    # Discharge at which a channel is `river_width` wide, as a fraction of the
+    # map. Deliberately *not* `river_threshold`: that one is the "how many
+    # rivers" slider, and measuring width against it made asking for more rivers
+    # widen every river already there.
+    river_width_ref: float = 0.0006
     river_incision: float = 0.02        # how deep the channel sits in the bed
     meander_amp: float = 1.5            # lateral swing in cells, times sqrt(width)
     meander_period: float = 30.0        # along-path wavelength, in cells
@@ -145,12 +170,17 @@ _PX_FIELDS = (
     "crust_blur", "crust_warp", "collision_w", "trench_w", "arc_offset",
     "arc_w", "cordillera_w", "rift_w", "ridge_w", "transform_w", "age_scale",
     "age_warp", "hotspot_sigma", "hotspot_spacing", "texture_warp",
-    "coast_plain_zone", "margin_zone", "margin_reach", "margin_cut_offset",
+    "coast_plain_zone", "rain_blur", "margin_zone", "margin_reach", "margin_cut_offset",
     "margin_cut_w", "margin_slope_blur", "meander_period", "meander_taper",
     "meander_amp", "river_width", "river_width_max",
 )
-# Rises per cell: the same climb spread over more cells is a gentler one.
-_PER_CELL_FIELDS = ("coast_slope", "talus", "outlet_carve_slope")
+# Rises per cell: the same climb spread over more cells is a gentler one. The
+# two rain rates go here for the same reason - moisture must cross a continent
+# in the same number of *continents*, not the same number of cells, or a bigger
+# map dries its interiors out further. `rain_orog` needs no scaling: it is rain
+# per unit climbed, and a range's total climb does not change with resolution.
+_PER_CELL_FIELDS = ("coast_slope", "talus", "outlet_carve_slope",
+                    "rain_base", "rain_ocean_gain")
 
 
 def _scale_to_size(cfg):
@@ -185,6 +215,7 @@ class World:
     height_eroded: np.ndarray   # after erosion, before rivers were cut in
     height: np.ndarray          # final
     water: rivers.Water
+    runoff: np.ndarray          # water a cell contributes, 1 on average on land
     timings: dict = field(default_factory=dict)
 
     @property
@@ -216,6 +247,7 @@ class World:
             "crust": "continental" if self.tect.plate_cont[p] else "oceanic",
             "elev": float(self.height[y, x]),
             "flow": float(w.flow[y, x]),
+            "rain": float(self.runoff[y, x]),
             "dist_to_boundary": float(self.tect.dist[y, x]),
             "river_w": float(w.width[y, x]),
             "lake_depth": float(w.lake_depth[y, x]),
@@ -268,14 +300,19 @@ def generate(cfg=None, verbose=True, on_stage=None, **overrides):
     eroded, er_filled, er_flow, er_rec = stage("erosion", lambda: hydrology.stream_power(
         pre.copy(), 0.0, cfg.erosion_passes, cfg.erosion_k, cfg.erosion_m,
         cfg.erosion_n, cfg.thermal_iters, cfg.talus))
+    # Rain is read off the eroded surface, which is the one the rivers will run
+    # on: the ranges that cast the shadows are the ones erosion left standing.
+    runoff, evap = stage("climate", lambda: climate.runoff(eroded, cfg, rng))
     # Erosion signs off by filling, routing and accumulating its finished
     # surface, and the river stage opens by needing exactly that. Hand it over
     # instead of letting it be recomputed.
     h, water = stage("rivers", lambda: rivers.build(
-        eroded.copy(), cfg, rng, routed=(er_filled, er_rec, er_flow)))
+        eroded.copy(), cfg, rng, routed=(er_filled, er_rec, er_flow),
+        runoff=runoff, evap=evap))
 
     world = World(cfg=cfg, tect=tect, height_raw=raw, height_pre=pre,
-                  height_eroded=eroded, height=h, water=water, timings=timings)
+                  height_eroded=eroded, height=h, water=water, runoff=runoff,
+                  timings=timings)
     if verbose:
         print(f"  {'total':<12} {sum(timings.values()):6.2f}s  "
               f"land={world.land.mean():.0%}  max={h.max():.2f}  min={h.min():.2f}  "
