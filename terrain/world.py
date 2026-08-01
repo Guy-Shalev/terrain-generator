@@ -159,6 +159,18 @@ class Config:
     # part of the expansion. 0.25 gives a dry-to-wet ratio of 1.67 against the
     # 1.96 the two adiabats really differ by. 0 is the flat rate.
     temp_lapse_moist: float = 0.25
+    # --- ocean currents ---
+    # Degrees the gyres move the sea surface off its latitude. Earth's eastern
+    # boundary upwelling runs 5-8 C below the zonal mean and the western
+    # boundary currents 3-5 C above, and the asymmetry is real: pulling cold
+    # water up from below is a stronger lever than carrying warm water along.
+    # The field averages to zero over the sea, so these set how far the two
+    # coasts of a continent part company, not how warm the world is.
+    current_cold: float = 6.0
+    current_warm: float = 4.0
+    current_reach: float = 40.0     # px offshore the anomaly reaches
+    current_lat: float = 0.35       # |latitude| the upwelling band sits on
+    current_blur: float = 8.0       # px; a gyre is not a coastline
     temp_wobble: float = 0.06       # how far the isotherms wander, in latitude
     temp_wobble_periods: float = 2.0
     temp_swing: float = 22.0        # seasonal half-range at the pole, deep inland
@@ -231,7 +243,7 @@ _PX_FIELDS = (
     "arc_w", "cordillera_w", "rift_w", "ridge_w", "transform_w", "age_scale",
     "age_warp", "hotspot_sigma", "hotspot_spacing", "texture_warp",
     "coast_plain_zone", "rain_blur", "temp_cont_reach", "biome_blur",
-    "biome_soften",
+    "biome_soften", "current_reach", "current_blur",
     "margin_zone", "margin_reach", "margin_cut_offset",
     "margin_cut_w", "margin_slope_blur", "meander_period", "meander_taper",
     "meander_amp", "river_width", "river_width_max",

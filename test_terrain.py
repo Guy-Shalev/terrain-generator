@@ -352,6 +352,51 @@ def test_lakes_and_rivers():
     assert (w.height <= w.height_eroded + 1e-9).all()
 
 
+def test_currents_tell_the_two_coasts_apart():
+    """A gyre is cold down the east side of its basin and warm up the west one.
+
+    Which is to say: cold off a continent's west coast, warm off its east, and
+    only in the subtropics for the cold half. Straight sea, so nothing but the
+    shore's direction can be making the difference.
+    """
+    h = np.full((288, 384), -0.5)
+    h[:, 150:250] = 0.3
+    cfg = Config(width=384, height=288, ref_width=384)
+    a = climate.currents(h, cfg)
+    sea = h <= 0
+    assert abs(float(a[sea].mean())) < 1e-9, "currents must move heat, not add it"
+    assert not a[~sea].any(), "the anomaly is the sea's, not the land's"
+
+    lat = np.abs(grid.latitude(h.shape))[:, 0]
+    sub = int(np.argmin(np.abs(lat - cfg.current_lat)))
+    west, east = a[sub, 140], a[sub, 260]        # water either side of the land
+    assert west < -2.0, f"no upwelling off the west coast: {west:.2f}"
+    assert east > 0.5, f"no warm current off the east coast: {east:.2f}"
+    assert abs(a[sub, 60]) < abs(west), "open ocean should be nearer the mean"
+    # Upwelling is a subtropical band; the warm limb keeps going poleward.
+    pol = int(np.argmin(np.abs(lat - 0.8)))
+    assert abs(a[pol, 140]) < abs(west), "upwelling reached the pole"
+    assert a[pol, 260] > east, "the warm limb should strengthen poleward"
+
+
+def test_currents_change_the_map():
+    """Measured, because a field that nothing downstream reads is decoration.
+
+    Same seed either way, and the current field draws no random numbers, so the
+    terrain underneath is identical and the cells compare one to one.
+    """
+    kw = dict(seed=7, width=192, height=144, erosion_passes=2)
+    off = generate(Config(current_cold=0.0, current_warm=0.0, **kw), verbose=False)
+    on = generate(Config(**kw), verbose=False)
+    assert np.array_equal(off.height_eroded, on.height_eroded), \
+        "currents moved the terrain; they may only move the climate"
+    land = on.land
+    d = np.abs(on.runoff - off.runoff)[land] / np.maximum(off.runoff[land], 1e-6)
+    assert np.percentile(d, 90) > 0.05, f"currents barely touched the rain: {d.max():.3f}"
+    moved = ((on.biome != off.biome) & land).sum() / land.sum()
+    assert moved > 0.01, f"only {moved:.1%} of land changed biome"
+
+
 def test_warm_seas_feed_more_rain():
     """The air over a warm sea carries more, so the tropics are wet without a
     band being drawn there. Belts off, so capacity is the only thing left."""

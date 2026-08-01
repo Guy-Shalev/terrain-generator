@@ -35,7 +35,7 @@ python test_terrain.py       # invariant checks
 | coastline | `terrain/elevation.py` | sea level by quantile, a bounded rise per cell away from the shore, slope-compensated fray and drowned inlets on continent-ocean margins, then noise frays the shoreline |
 | erosion | `terrain/hydrology.py` | thermal creep, depression filling, D8 routing, flow accumulation, stream-power incision, repeated |
 | temperature | `terrain/climate.py` | latitude curve, moist-dependent lapse rate, continentality damped by sea ice |
-| climate | `terrain/climate.py` | moisture capacity from sea surface temperature, zonal rain belts, moisture marched downwind for orographic shadows, runoff and evaporation fields |
+| climate | `terrain/climate.py` | moisture capacity from sea surface temperature, gyre currents warming and cooling it by basin side, zonal rain belts, moisture marched downwind for orographic shadows, runoff and evaporation fields |
 | lakes and rivers | `terrain/rivers.py` | lake water balance, outlet carving, polyline extraction, meandering, discharge-based width, channel incision |
 | biomes | `terrain/climate.py` | temperature from latitude, lapse rate and continentality; biomes from temperature against rain relative to evapotranspiration |
 
@@ -271,6 +271,49 @@ term is several times the base on any real slope.
 The latitudinal profile that falls out, as mean runoff over land: **1.75** in
 the tropics, **0.41** at 30 degrees, **0.75** at 60. That shape used to come
 entirely from one hand-drawn cosine.
+
+### Ocean currents
+
+Latitude alone gives every ocean cell in a row the same temperature, so the only
+thing that could tell two coasts apart was which way the wind blew over them.
+A gyre turns at the edges of its basin and the two edges are not alike. Down the
+*eastern* side of an ocean - the west coast of a continent - it carries water
+towards the equator and pulls cold water up behind it: Benguela, Humboldt,
+Canary, California. Up the *western* side it runs poleward and warm: the Gulf
+Stream, the Kuroshio.
+
+So the sign comes from which way the nearest shore lies. `_shore_weight` marches
+that in one direction at a time, by the same recurrence the moisture uses and
+for the same reason - a distance transform is isotropic, and "how near is any
+land" is the one thing this must not know, since the shore behind a parcel of
+water and the shore ahead of it are different facts.
+
+The two latitude profiles differ because the two mechanisms do. Upwelling is a
+subtropical band (`current_lat`) and fades either side of it. The warm limb
+scales with latitude instead: it is an anomaly against the local mean, and at
+the equator there is no meridional gradient left for it to carry up. The field
+is averaged to zero over the sea, so currents move heat around rather than add
+it - the temperature slider is calibrated, and a current field with a mean would
+quietly bias every world against the number it was tuned to.
+
+Measured against the same seeds with `current_cold` and `current_warm` at zero,
+at 384x288. Sea surface temperature spread *within one latitude row* was 1.3-2.0
+degrees, which is the wobble noise and nothing else; with currents it is
+**4.1-4.4**. Downstream, runoff on land moves by 4-6% at the median and **17-18%
+at the 90th percentile**, and **7-8% of land changes biome**. Desert goes up
+about two points. Cost is 0.05 s of a 2.1 s build.
+
+Sea ice barely notices, and that was the prediction that missed: the plan was
+for warm water to keep a polar coast open and turn its tundra to taiga, but polar
+sea here sits some 25 degrees below freezing and a 4 degree anomaly cannot cross
+that. Only the narrow ring already near the ice edge flips, and the extent moves
+by about 1%. What currents actually buy is rain on the mid-latitude coasts,
+where the ocean is upwind.
+
+Which is also why there is no Atacama. In the trades the wind blows east to west,
+so a west coast's upwind is *continent* and a cold current sitting off it never
+touches the marching air. The coastal deserts that do exist there are rain
+shadows, and were already there.
 
 Then moisture is marched downwind, one column at a time. Winds are zonal -
 easterly in the tropics and at the poles, westerly between - so the march runs
@@ -732,10 +775,10 @@ the same thing in 1.7 KB.
 
 Nothing human-made. Climate is annual-mean plus a seasonal half-range, which is
 enough for Whittaker but not for Koppen-Geiger - that keys on *when* the rain
-falls, and the moisture march has no seasons to put it in. No ocean currents
-either, so there is no warm west coast and no Atacama: the only thing that
-makes one coast differ from another at the same latitude is which way its wind
-blows. Mediterranean shrubland is placed as subtropical semiarid, which is the
+falls, and the moisture march has no seasons to put it in. Ocean currents set
+the sea's temperature but not the land's: a warm current makes the coast beside
+it rainier and not milder, because advecting that heat inland is a term of its
+own and this has none. Mediterranean shrubland is placed as subtropical semiarid, which is the
 right corner of the diagram but not the real test, since the real test is a dry
 summer. Climate feeds nothing back: erosion still runs on unweighted flow, so a
 soaked windward slope carves no faster than the desert behind it, and the biome

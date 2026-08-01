@@ -91,6 +91,72 @@ def capacity(temp, cfg, sea_level=0.0, h=None):
     return cap
 
 
+def _shore_weight(land, reach, east):
+    """How near the shore is, looking in one direction only, decaying with distance.
+
+    Marched rather than measured. A distance transform is isotropic and would
+    answer "how near is any land", which is the one thing this must not know:
+    the whole point is that the shore *behind* a parcel of water and the shore
+    *ahead* of it are different facts. One pass carrying `max(land, w * decay)`
+    is the same recurrence `_march` uses for moisture, and for the same reason -
+    the world is a cylinder with no edge to start at, so the first lap is thrown
+    away and only the state it leaves behind is kept.
+
+    Comes out at 1 on land itself. Nothing reads it there.
+    """
+    decay = np.exp(-1.0 / max(1e-6, reach))
+    cols = range(land.shape[1] - 1, -1, -1) if east else range(land.shape[1])
+    w = np.zeros(land.shape[0])
+    out = np.zeros(land.shape)
+    for lap in range(2):
+        for x in cols:
+            w = np.maximum(land[:, x], w * decay)
+            if lap:
+                out[:, x] = w
+    return out
+
+
+def currents(h, cfg, sea_level=0.0):
+    """Sea surface temperature anomaly from the subtropical gyres, in degrees C.
+
+    Without this, every ocean cell at a latitude is the same temperature, and so
+    the only thing that can tell two coasts apart is which way the wind blows
+    over them. A gyre turns at the edges of its basin, and the two edges are not
+    alike: on the *eastern* side of an ocean - the west coast of a continent -
+    it carries water towards the equator and pulls cold water up behind it, which
+    is Benguela, Humboldt, Canary and California. On the *western* side it runs
+    poleward and warm, which is the Gulf Stream and the Kuroshio.
+
+    So the sign is taken from which way the nearest shore lies, and the latitude
+    profiles differ because the two mechanisms do. Upwelling is a subtropical
+    band and fades either side of it. A warm western boundary current is scaled
+    by latitude instead: it is an anomaly against the local mean, and at the
+    equator there is no meridional gradient left for it to carry anything up.
+
+    Averaged to zero over the sea, so this moves heat around rather than adding
+    it. The temperature slider is calibrated, and a current field with a mean
+    would quietly bias every world against the number that was tuned.
+    """
+    land = h > sea_level
+    sea = ~land
+    if not sea.any():
+        return np.zeros_like(h)
+    lat = np.abs(grid.latitude(h.shape)) + np.zeros_like(h)
+    # 0.18 is the half-width of the upwelling band, and it is not a knob: it is
+    # the width that puts the cold edge on the subtropics and leaves both the
+    # equator and the storm track alone, which is the shape of the mechanism
+    # rather than a taste.
+    cold = np.exp(-((lat - cfg.current_lat) / 0.18) ** 2)
+    a = (cfg.current_warm * _shore_weight(land, cfg.current_reach, east=False) * lat
+         - cfg.current_cold * _shore_weight(land, cfg.current_reach, east=True) * cold)
+    # Masked, or the blur drags the land's zeros into exactly the cells the
+    # anomaly is meant to be strongest in - the ones against the coast. Dividing
+    # by the blurred mask keeps a bay at the full strength of its own water.
+    m = sea.astype(float)
+    a = grid.blur(a * m, cfg.current_blur) / np.maximum(grid.blur(m, cfg.current_blur), 1e-6)
+    return np.where(sea, a - float(a[sea].mean()), 0.0)
+
+
 def rainfall(h, cfg, rng, sea_level=0.0, temp=None):
     """Rain per cell. Winds are zonal: easterly in the tropics and at the poles,
     westerly in between, which is why the marching is done in two groups."""
@@ -202,7 +268,13 @@ def temperature(h, cfg, rng, sea_level=0.0, humid=None):
     if land.any():
         weight = weight / max(1e-6, float(weight[land].mean()))
     temp = (base + cfg.temp_offset * weight
-            - _lapse(humid, land, cfg) * np.maximum(h - sea_level, 0.0))
+            - _lapse(humid, land, cfg) * np.maximum(h - sea_level, 0.0)
+            # Sea only, and deliberately not carried onto the land beside it.
+            # A warm current does moderate the coast it runs along, but that is
+            # advection inland and a term of its own; what this does here is
+            # feed `capacity`, so the water changes the rain it sends over the
+            # land rather than the land's own temperature.
+            + currents(h, cfg, sea_level))
     # Saturating rather than linear: the moderating reach of an ocean is spent
     # within a few hundred km of it, and past that one more cell inland changes
     # nothing. Linear in the distance instead, the middle of a big continent
