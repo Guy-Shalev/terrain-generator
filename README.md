@@ -15,7 +15,7 @@ python viewer.py --seed 7 --size 640x448
 ```
 
 ```bash
-python preview.py 7          # write every layer to out/ as PNG
+python preview.py 7          # layers to out/, engine export to out/export/seed7/
 ```
 
 ```bash
@@ -55,7 +55,8 @@ the rest of the ocean floor and the continental interiors stay unbroken.
 
 Left-drag or WASD/arrows to pan, wheel to zoom, `Z` to fit. Number keys pick a
 layer, `[` `]` cycle. `R` regenerates with a new seed, `T` with the same one,
-`G` overlays plate motion arrows, `P` saves the current layer, `F1` toggles help.
+`G` overlays plate motion arrows, `P` saves the current layer, `E` exports the
+world for an engine, `F1` toggles help.
 The status bar reads out elevation, plate, crust type, distance to the nearest
 plate boundary, drainage area, temperature and biome under the cursor.
 
@@ -641,6 +642,91 @@ ones.
 `polylines`, `widths`, plus `flow` and `receivers`. `world.surface` returns the water
 surface where there is water and the bed everywhere else, which is what the
 relief layer hillshades so lakes come out flat.
+
+## Getting a world out
+
+`terrain/export.py` writes five files. A heightmap alone imports as grey rock:
+the bed says what shape the land is, the lake depths say where water sits on it,
+the biome indices say what covers it, and the river paths are vectors because
+that is what they were before they were rasterised.
+
+| file | what it is |
+|---|---|
+| `_height16.png` | the bed, 16-bit greyscale |
+| `_lakes16.png` | lake depth, 16-bit, zero everywhere dry |
+| `_biome.png` | `climate` biome index per cell, 8-bit, names in the sidecar |
+| `_rivers.json` | channel centrelines and per-node width |
+| `_config.json` | the seed, every knob, and a stamp of the code that read them |
+
+The rasters are the result, and a lossy one: 16 bits is a third of a metre at
+`metres_per_unit`, and nothing in them carries the plates, the stress, the
+temperature or the flow. `_config.json` is what rebuilds the world -
+`generate(export.load_config(path))` returns it bit for bit.
+
+That file overwrites `ref_width` with the map's own width, and that is the whole
+subtlety. `generate` scales every pixel-denominated knob from `ref_width` to the
+width being built and keeps the *scaled* config on the world, so handing that
+copy back scales it a second time and builds a different world - silently, and
+only at sizes other than the reference, which is why the round-trip test runs at
+256 and asserts the naive version still fails.
+
+The knobs alone are still a false promise, because every one of them can be
+unchanged while an edit to `elevation.py` moves every coastline. So `generator`
+carries a hash of the package's own source and the versions of the two libraries
+whose arithmetic the output is made of. It is conservative in one direction only:
+equal means the same code and so the same map, different means *unverified*
+rather than different, since reformatting a comment moves the hash and nothing
+else. `load_config` warns on a mismatch and loads anyway - it also drops knobs it
+does not recognise, so a config from a build that has since gained or lost one
+still rebuilds what it can.
+
+`E` in the viewer writes the set for the world on screen, `preview.py` writes it
+while it writes the layers. Both land in a folder of their own under
+`out/export/`, named for the seed, and a **new one every time** - `seed7`, then
+`seed7-2`. An export is a thing you keep, and the reason to press the key twice
+is usually that the second world is worth comparing to the first; overwriting is
+the one behaviour that cannot be undone from outside. The name is claimed by
+creating the directory and catching the failure rather than by asking whether it
+exists first, which is two steps with room for another export in between. The viewer exports the whole world, not the current view:
+pan and zoom are for looking at it.
+
+Eight bits is not enough for the terrain. The map spans a couple of height units,
+and 256 codes across that terraces every plain and shelf, which is exactly where
+a heightmap gets looked at flat. Biome indices *are* 8-bit, because they are
+labels - there are thirteen of them and nothing in between - and greyscale
+rather than palettised: what an engine wants is the index, to pick a texture or
+a scatter rule with, and a palette buries that under colours it would have to
+match back.
+
+Written by hand, not through an imaging library. A greyscale PNG with no
+interlacing and filter type 0 on every row is a signature, three chunks and a
+zlib stream - smaller than the dependency would be.
+
+A heightmap on its own is unitless, so a JSON sidecar goes with each:
+`lo + code * units_per_code` puts the surface back in the generator's units and
+`metres_per_unit` puts it on the ground. That last one is chosen, not measured -
+`temp_lapse` is calibrated by reading the ~0.5 that land runs to as a 6 km range,
+which puts a unit at 12 km, and every biome on the map is downstream of that
+reading. An importer has to scale by something, and the number the climate was
+tuned against beats a guess. `sea_code` says where the coastline landed, and
+`wrap: x` says the map is a cylinder - which is also why river points can run
+past the map's width rather than jumping at the seam.
+
+The lake depths go out on their own scale rather than the bed's: the bed spans
+the abyss to the summit, and a lake is metres deep in that, so shared it would
+be a handful of codes wide. Pass `lo` and `hi` when two exports *do* have to
+line up - a series of seeds, adjacent tiles, or the flat water surface against
+the bed it sits in:
+
+```python
+m = export.heightmap(world.height, "height16.png")
+export.heightmap(world.surface, "surface16.png", m["lo"], m["hi"])
+```
+
+That pair was written by default for a while, until it was measured: the bed and
+the surface differ on lake cells and nowhere else, **106 cells of 49152** at
+256x192, so the second file was 375 KB restating the first. The lake depths say
+the same thing in 1.7 KB.
 
 ## Not done yet
 

@@ -1,9 +1,15 @@
 """Invariant checks for the generator. Run: python test_terrain.py"""
+import json
+import struct
+import tempfile
+import zlib
+from pathlib import Path
+
 import numpy as np
 from scipy import ndimage
 
 from terrain import Config, generate
-from terrain import climate, grid, hydrology, noise, render, rivers, world
+from terrain import climate, export, grid, hydrology, noise, render, rivers, world
 
 
 def test_grid_wraps():
@@ -665,6 +671,114 @@ def test_relief_does_not_sharpen_with_map_size():
         f"boundary relief sharpened with size: {small:.2f} -> {big:.2f}"
 
 
+def _read_png16(path):
+    """Enough of a PNG reader to check what `export` wrote, and no more.
+
+    Deliberately not the writer run backwards: it walks the chunks itself and
+    checks every CRC, so a malformed length or a bad checksum fails here rather
+    than in whatever engine loads the file next.
+    """
+    raw = Path(path).read_bytes()
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+    chunks, i = {}, 8
+    while i < len(raw):
+        n = struct.unpack(">I", raw[i:i + 4])[0]
+        tag, body = raw[i + 4:i + 8], raw[i + 8:i + 8 + n]
+        assert zlib.crc32(tag + body) == struct.unpack(">I", raw[i + 8 + n:i + 12 + n])[0], tag
+        chunks[tag] = chunks.get(tag, b"") + body
+        i += 12 + n
+    w, h, depth, ctype = struct.unpack(">IIBB", chunks[b"IHDR"][:10])
+    assert ctype == 0 and depth in (8, 16), f"want greyscale 8/16, got {depth}/{ctype}"
+    n = depth // 8
+    rows = np.frombuffer(zlib.decompress(chunks[b"IDAT"]), np.uint8).reshape(h, w * n + 1)
+    assert not rows[:, 0].any(), "every row must carry filter type 0"
+    px = rows[:, 1:].copy()
+    return px if n == 1 else px.view(">u2")
+
+
+def test_heightmap_export():
+    """Codes must map back to the heights they came from, within half a step."""
+    rng = np.random.default_rng(0)
+    # Odd dimensions on purpose: rows are written one at a time, and a width
+    # that is not a nice multiple is where a stride mistake would show.
+    h = rng.normal(0.1, 0.4, (17, 23))
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "h.png"
+        meta = export.heightmap(h, path)
+        codes = _read_png16(path)
+        assert codes.shape == h.shape
+        back = meta["lo"] + codes * meta["units_per_code"]
+        assert np.abs(back - h).max() <= meta["units_per_code"] * 0.51, "lost more than rounding"
+        assert json.loads(Path(str(path)[:-4] + ".json").read_text()) == meta
+        # Sea level has to be findable in the codes, or the map is unusable.
+        assert abs(meta["sea_code"] * meta["units_per_code"] + meta["lo"]) < 1e-9
+        # A shared scale is the whole point of lo/hi: same height, same code.
+        export.heightmap(h * 0.5, path, meta["lo"], meta["hi"])
+        half = _read_png16(path)
+        assert np.abs(half[h > 0].astype(int) - codes[h > 0]).min() > 0
+        assert half.max() < codes.max(), "second export ignored the handed-in scale"
+
+
+def test_indexmap_export():
+    """Class indices must survive exactly - they are labels, not measurements."""
+    ids = np.arange(12, dtype=np.int8).reshape(3, 4)
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "b.png"
+        meta = export.indexmap(ids, path, climate.BIOME_NAMES)
+        assert np.array_equal(_read_png16(path), ids), "indices must not be rescaled"
+        assert meta["classes"] == climate.BIOME_NAMES
+        # A byte cannot hold more, and silently wrapping would relabel the map.
+        try:
+            export.indexmap(np.array([[300]]), path, [])
+            assert False, "out-of-range indices must raise"
+        except ValueError:
+            pass
+
+
+def test_exported_config_rebuilds_the_world():
+    """The written config must rebuild the same map, bit for bit.
+
+    Deliberately at a width other than `ref_width`, because that is the only
+    place the bug lives: `generate` keeps the *scaled* config on the world, and
+    handing that straight back scales the pixel knobs a second time. At the
+    reference width the scaling is a no-op and a broken round-trip passes.
+    """
+    w = generate(Config(seed=5, width=256, height=192, erosion_passes=2), verbose=False)
+    assert w.cfg.width != Config().ref_width, "test must run off the reference width"
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "cfg.json"
+        export.config(w.cfg, path)
+        again = generate(export.load_config(path), verbose=False)
+    assert np.array_equal(again.height, w.height), "rebuild differs from the export"
+    assert np.array_equal(again.biome, w.biome)
+    # And the naive version really is wrong, or the re-anchoring above is
+    # cargo cult. Same seed, same knobs, scaled twice.
+    twice = generate(world.replace(w.cfg), verbose=False)
+    assert not np.array_equal(twice.height, w.height), \
+        "double-scaling no longer changes the world; re-anchoring may be dead code"
+
+
+def test_config_stamp_flags_a_different_generator():
+    """A config that says nothing about the code that wrote it is a false promise."""
+    import warnings as _w
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "cfg.json"
+        meta = export.config(Config(seed=1), path)
+        assert "src:" in meta["generator"] and "numpy:" in meta["generator"]
+        with _w.catch_warnings():
+            _w.simplefilter("error")        # a matching stamp must stay quiet
+            export.load_config(path)
+        doctored = json.loads(path.read_text())
+        doctored["generator"] = "src:000000000000 numpy:0 scipy:0"
+        doctored["a_knob_from_the_future"] = 1
+        path.write_text(json.dumps(doctored))
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            cfg = export.load_config(path)   # must still load, warning or not
+        assert cfg.seed == 1
+        assert len(caught) == 2, [str(c.message) for c in caught]
+
+
 def test_world():
     w = generate(Config(width=128, height=96, seed=5, erosion_passes=2), verbose=False)
     assert w.height.shape == (96, 128)
@@ -682,6 +796,27 @@ def test_world():
     for i in range(len(render.LAYERS)):
         name, img = render.layer(w, i)
         assert img.shape == (96, 128, 3) and img.dtype == np.uint8, name
+    # The whole export bundle, on the world that is already built.
+    with tempfile.TemporaryDirectory() as d:
+        out = export.bundle(w, d)
+        assert out.name == f"seed{w.cfg.seed}"
+        for f in ("height16.png", "lakes16.png", "biome.png", "rivers.json",
+                  "config.json"):
+            assert (out / f).exists(), f
+        # A second export must not land on the first: these are kept, and an
+        # overwrite is the one mistake that cannot be undone from outside.
+        again = export.bundle(w, d)
+        assert again != out and again.name == f"seed{w.cfg.seed}-2", again
+        assert (out / "config.json").exists(), "first export was clobbered"
+        assert np.array_equal(_read_png16(out / "biome.png"), w.biome), \
+            "biome indices did not round-trip"
+        js = json.loads((out / "rivers.json").read_text())
+        assert len(js["rivers"]) == len(w.water.polylines)
+        # Points are [x, y], the transpose of how the arrays hold them; getting
+        # that backwards on a non-square map is silent until something loads it.
+        first = js["rivers"][0]
+        assert np.allclose(first["points"][0][::-1], w.water.polylines[0][0], atol=1e-3)
+        assert len(first["width"]) == len(first["points"])
 
 
 if __name__ == "__main__":

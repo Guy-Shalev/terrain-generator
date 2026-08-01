@@ -5,7 +5,7 @@ import sys
 import numpy as np
 import pygame
 
-from terrain import Config, generate, render
+from terrain import Config, generate, export, render
 
 
 def save(img, path):
@@ -24,7 +24,8 @@ def main():
             c = img[h // 3:h // 3 + h // 3, w // 3:w // 3 + w // 3]
             c = np.repeat(np.repeat(c, 3, 0), 3, 1)
             save(c, f"out/crop_{i:02d}.png")
-    print(f"wrote {len(render.LAYERS)} layers to out/")
+    print(f"wrote {len(render.LAYERS)} layers to out/ and "
+          f"the export set to {export.bundle(world).as_posix()}/")
 
 
 if __name__ == "__main__":

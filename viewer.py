@@ -9,7 +9,7 @@ import argparse
 import numpy as np
 import pygame
 
-from terrain import Config, generate, render
+from terrain import Config, generate, export, render
 
 
 def _map_height(width):
@@ -36,6 +36,7 @@ HELP = [
     "T                           regenerate, same seed",
     "G                           toggle plate motion arrows",
     "P                           save the current layer to out/",
+    "E                           export the world to out/export/",
     "F1                          this help",
     "ESC                         quit",
 ]
@@ -369,6 +370,8 @@ class Viewer:
                                            self.screen.get_height() // 2))
                     if e.key == pygame.K_p:
                         self.save()
+                    if e.key == pygame.K_e:
+                        self.export()
 
             keys = pygame.key.get_pressed()
             step = 12 / self.zoom
@@ -389,6 +392,11 @@ class Viewer:
         path = f"out/seed{self.cfg.seed}_{name.replace(' ', '_').replace('/', '-')}.png"
         pygame.image.save(surf, path)
         self.busy = f"saved {path}"
+
+    def export(self):
+        """The whole world, not the view: pan and zoom are for looking at it."""
+        # A fresh folder each press, never an overwrite; `bundle` picks the name.
+        self.busy = f"exported to {export.bundle(self.world).as_posix()}/"
 
 
 def main(argv=None):
