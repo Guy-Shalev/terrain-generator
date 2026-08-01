@@ -346,6 +346,31 @@ def test_lakes_and_rivers():
     assert (w.height <= w.height_eroded + 1e-9).all()
 
 
+def test_rivers_reach_water():
+    """Every drawn river must be part of a body that reaches a lake or the sea.
+
+    A river ending in open ground is the one defect that reads as broken from
+    across the map. They came from channels being cut at the rim of the basin
+    holding a lake rather than at the water's edge - a quarter of the river
+    cells on this seed, a median of 4 to 7 cells short of the pond they were
+    running into.
+
+    Labelled on a 3x tiling, so a body spanning the x seam stays one body.
+    """
+    for kw in (dict(width=512, height=384, seed=1),      # was 25% stray
+               dict(width=384, height=288, seed=42),
+               dict(width=256, height=192, seed=3)):
+        w = generate(Config(**kw), verbose=False)
+        wid = w.height.shape[1]
+        sea, lake, riv = w.height <= 0, w.lakes, w.rivers
+        lab, _ = ndimage.label(np.concatenate([sea | lake | riv] * 3, axis=1),
+                               np.ones((3, 3)))
+        reaches = set(np.unique(lab[np.concatenate([sea | lake] * 3, axis=1)])) - {0}
+        stray = np.isin(lab[:, wid:2 * wid], list(reaches), invert=True) & riv
+        assert not stray.any(), \
+            f"{int(stray.sum())} of {int(riv.sum())} river cells reach no water: {kw}"
+
+
 def test_meander_stays_attached():
     """The swing must move the path and leave both ends exactly where they were,
     or every tributary detaches from its trunk."""

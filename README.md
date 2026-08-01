@@ -456,15 +456,55 @@ exactly the set of cells with nothing left upstream, so the gate fires once and
 sees everything. Water that a lake keeps therefore leaves the network, and the
 channels below a terminal lake come out dry rather than merely narrow.
 
-Two things about that are worth knowing. D8 does not already converge a basin on
-its exit - the fill's epsilon tilt drains a basin through the shallow rim strip
-that `lake_min_depth` leaves outside the label, so a labelled basin has 3 to 24
-cells whose receiver is not in it, and gating any one of them would see a
-fraction of the water. And because the rerouting is a shortcut across the basin
-floor, channels have to stop at the *basin* rather than at the water's edge:
-traced through the dry margin of a part-full lake, a path follows that shortcut
-and draws a ruler-straight river across the lake bed - one 14.6-cell step on
-seed 3 at 384x288, against 1.5 for every other path on the map.
+D8 does not already converge a basin on its exit - the fill's epsilon tilt
+drains a basin through the shallow rim strip that `lake_min_depth` leaves outside
+the label, so a labelled basin has 3 to 24 cells whose receiver is not in it, and
+gating any one of them would see a fraction of the water.
+
+## Rivers have to end somewhere
+
+That rewiring is right for accounting and wrong for geometry, because it is a
+shortcut straight across the lake bed. Channels used to be cut at the rim of the
+basin instead, which stopped a river several cells short of the pond it was
+running into - and once the climate stage made evaporation local, dry-region
+lakes shrank and the gap got wide enough to see. A quarter of the river cells on
+seed 1 at 512x384 belonged to a body of water touching neither lake nor sea,
+a median of 4 to 7 cells short of one:
+
+| stray river cells | 512x384 | 1024x768 |
+|---|---|---|
+| seed 7 | 0.6% | 1.0% |
+| seed 3 | 3.1% | 6.8% |
+| seed 1 | 25.0% | 9.9% |
+
+So the geometry gets its own receivers. Inside a basin they are a breadth-first
+tree grown out from that basin's own lake, each ring pointing back at the one
+before it, and the tracer is allowed to walk a channel across any cell the fill
+had to raise. Three things were learned the hard way there:
+
+- **Aim at the basin's own lake, not at the nearest water.** Measured against
+  water of any kind, a basin whose rim runs near the coast has its gradient
+  pointing over that rim at the sea, so the path climbs out, misses the pond and
+  stops on the far slope five to eight cells from anything.
+- **A gradient is not enough; it needs to be a tree.** Restricting the gradient
+  to the basin leaves cells with no improving neighbour, which fall back to
+  their plain receiver - and a plain receiver pointing back at a rerouted cell
+  is a two-cell loop that swallows a river silently. Seed 1 had one at (239, 60)
+  and (239, 61). A BFS tree cannot contain one.
+- **Discharge has to be carried across.** The accounting graph has already sent
+  the basin's water to its exit, so the floor a river crosses reads about one
+  cell's worth. Widths take a running maximum along each path, which also
+  restores the "discharge only grows downstream" property the balance's gate
+  broke.
+
+That leaves the junctions. A tributary's mouth is pinned to the trunk cell it
+joined, then the trunk meanders a cell or two away and the two no longer touch.
+`_connect_strays` is the backstop: every body of water is a component of
+`river | lake | sea`, and one touching neither lake nor sea is walked downstream
+from its widest cell and painted until it reaches water, or erased if it never
+does. It is a mop, not a mechanism - it bridges a couple of cells at a junction
+and nothing more - but `test_rivers_reach_water` holds the whole thing to zero
+strays at three sizes.
 
 The trade is that basins whose outflow is under the bar keep their water
 instead of being drained - which the balance makes commoner, since it is what

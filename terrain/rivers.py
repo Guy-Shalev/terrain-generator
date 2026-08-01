@@ -69,7 +69,7 @@ def _label_lakes(h, filled, cfg, sea_level=0.0):
     return remap[lbl], int(remap.max())
 
 
-_Routed = namedtuple("_Routed", "filled rec flow lake_id n level outflow")
+_Routed = namedtuple("_Routed", "filled rec plain flow lake_id n level outflow")
 
 
 def _lake_balance(h, filled, rec, lbl, n, cfg, evap=None):
@@ -152,6 +152,74 @@ def _lake_balance(h, filled, rec, lbl, n, cfg, evap=None):
     return rec, (mask, gate), level, outflow
 
 
+def _shift_local(a, dy, dx):
+    """`grid.shift` without the wrap, for working inside one basin's bounding box."""
+    out = np.zeros_like(a)
+    hh, ww = a.shape
+    out[max(0, -dy):hh - max(0, dy), max(0, -dx):ww - max(0, dx)] = \
+        a[max(0, dy):hh - max(0, -dy), max(0, dx):ww - max(0, -dx)]
+    return out
+
+
+def _draw_receivers(rec, basin, lake, lbl):
+    """Receivers for *drawing*: inside a basin, step towards the water.
+
+    The accounting graph points every cell of a basin straight at the basin's
+    exit, which is what lets the balance finalise the whole inflow at one gate -
+    but it is a shortcut across the lake bed, and a path traced along it draws a
+    ruler-straight river a dozen cells long. Following the plain D8 receivers
+    instead is no better: the fill leaves an epsilon tilt that drains a basin
+    towards its *spill*, so about 40% of the rivers reaching a part-full lake
+    would skirt the pond and run past it to the rim.
+
+    So a basin's dry floor gets its own receivers: a breadth-first tree grown
+    out from that basin's own lake, each ring pointing back at the one before
+    it. Every step is a single cell, so nothing can teleport, and every step
+    goes down a ring, so the graph cannot contain a cycle.
+
+    Both of those were learned the hard way from the obvious version - step to
+    whichever neighbour is nearest open water. Measured against water of *any*
+    kind, a basin whose rim runs near the coast has its gradient pointing over
+    that rim at the sea, so a path climbs out of the basin, misses the pond and
+    stops on the far slope. Restricting it to the basin's own lake instead
+    leaves cells with no improving neighbour at all, which fall back to their
+    plain receiver - and a plain receiver pointing back at a rerouted cell is a
+    two-cell loop that swallows the river silently. Seed 1 at 512x384 had one at
+    (239, 60) and (239, 61).
+
+    Grown per basin inside its bounding box: the rings are tens of cells across
+    where the map is hundreds, and the whole-grid version of this is 400 shifts
+    of a 0.8M-cell array.
+    """
+    if not basin.any() or not lake.any():
+        return rec
+    rec = rec.copy()
+    W = rec.shape[1]
+    for sl in ndimage.find_objects(lbl):
+        if sl is None:
+            continue
+        ys = slice(max(0, sl[0].start - 1), min(rec.shape[0], sl[0].stop + 1))
+        xs = slice(max(0, sl[1].start - 1), min(W, sl[1].stop + 1))
+        todo, frontier = basin[ys, xs].copy(), lake[ys, xs]
+        if not (todo.any() and frontier.any()):
+            continue
+        gidx = (np.arange(ys.start, ys.stop)[:, None] * W +
+                np.arange(xs.start, xs.stop)[None, :])
+        sub = rec[ys, xs]
+        while frontier.any() and todo.any():
+            found = np.zeros_like(todo)
+            for dy, dx in grid.NEIGH8:
+                near = _shift_local(frontier, dy, dx) & todo & ~found
+                if not near.any():
+                    continue
+                sub[near] = _shift_local(gidx, dy, dx)[near]
+                found |= near
+            todo &= ~found
+            frontier = found
+        rec[ys, xs] = sub
+    return rec
+
+
 def _route_water(h, cfg, sea_level=0.0, filled=None, rec=None,
                  runoff=None, evap=None):
     """Fill, route, label lakes, and accumulate under each lake's water balance.
@@ -175,10 +243,14 @@ def _route_water(h, cfg, sea_level=0.0, filled=None, rec=None,
     lbl, n = _label_lakes(h, filled, cfg, sea_level)
     if n == 0:
         flow = hydrology.accumulate(filled, rec, weights=runoff)
-        return _Routed(filled, rec, flow, lbl, 0, np.zeros(1), np.zeros(1))
+        return _Routed(filled, rec, rec, flow, lbl, 0, np.zeros(1), np.zeros(1))
+    # `plain` is D8 as routed, before the balance points every basin cell at its
+    # exit. The rewire is right for accounting and wrong for geometry; see
+    # `_draw_receivers`.
+    plain = rec
     rec, gate, level, outflow = _lake_balance(h, filled, rec, lbl, n, cfg, evap)
     flow = hydrology.accumulate(filled, rec, weights=runoff, gate=gate)
-    return _Routed(filled, rec, flow, lbl, n, level, outflow)
+    return _Routed(filled, rec, plain, flow, lbl, n, level, outflow)
 
 
 def carve_outlets(h, cfg, sea_level=0.0, routed=None, runoff=None, evap=None):
@@ -248,13 +320,22 @@ def carve_outlets(h, cfg, sea_level=0.0, routed=None, runoff=None, evap=None):
 # network geometry
 
 
-def polylines(flow, rec, channel):
-    """Trace the channel network into paths, each running head -> mouth/junction."""
+def polylines(flow, rec, channel, cross=None):
+    """Trace the channel network into paths, each running head -> mouth/junction.
+
+    Heads come from `channel` alone, so no path starts on a `cross` cell.
+    """
     hh, w = flow.shape
     up = np.bincount(rec.ravel()[channel.ravel()], minlength=flow.size)
     heads = np.flatnonzero(channel.ravel() & (up == 0))
     heads = heads[np.argsort(-flow.ravel()[heads])]  # longest rivers claim first
     recf, chan = rec.ravel(), channel.ravel()
+    # Cells a path may run through without being channel cells themselves: the
+    # floor of a basin, where the accounting graph leaves a discharge of about
+    # one cell's worth even though a whole river is crossing it. Without this
+    # the path stops one step into the basin and the river ends in open ground
+    # several cells short of the lake.
+    crossf = np.zeros(flow.size, bool) if cross is None else cross.ravel()
     visited = np.zeros(flow.size, bool)
     out = []
     for start in heads:
@@ -265,9 +346,9 @@ def polylines(flow, rec, channel):
             nxt = int(recf[c])
             if nxt == c:
                 break
-            path_end = visited[nxt] or not chan[nxt]
+            path_end = visited[nxt] or not (chan[nxt] or crossf[nxt])
             if path_end:
-                path.append(nxt)     # touch the trunk (or the sea) and stop
+                path.append(nxt)     # touch the trunk (or the water) and stop
                 break
             c = nxt
         if len(path) >= 3:
@@ -357,6 +438,64 @@ def _disc(width_map, y, x, chan_w):
     np.maximum.at(width_map, (ys[yy], xs[xx] % w), chan_w)
 
 
+def _connect_strays(width, lake_mask, sea, draw, cfg, budget=400):
+    """Water a reader can follow: every channel must end at a lake or the sea.
+
+    A backstop, not a mechanism. The drawing receivers are what actually keep
+    rivers running to the water, and this should have nothing to do on a default
+    map - `test_rivers_reach_water` asserts that it finds nothing left to fix.
+    It exists because a stranded river is the one defect that reads as broken
+    from across the map, and there are several ways to strand one: the map-edge
+    cut, a discharge gate, a lake that shrank away from a channel drawn before it
+    was known.
+
+    Each body of water is one component of `river | lake | sea`, labelled on a
+    3x horizontal tiling so the seam does not split one in two. A component
+    touching neither lake nor sea is walked downstream from its lowest cell and
+    painted at its own width until it reaches water; if the budget runs out, it
+    is erased rather than left hanging.
+    """
+    river = width > 0
+    if not river.any():
+        return width
+    w = width.shape[1]
+    lab, n = ndimage.label(np.concatenate([river | lake_mask | sea] * 3, axis=1),
+                           structure=np.ones((3, 3)))
+    if n == 0:
+        return width
+    mid = lab[:, w:2 * w]
+    reaches = np.zeros(n + 1, bool)
+    reaches[np.unique(lab[np.concatenate([lake_mask | sea] * 3, axis=1)])] = True
+    stray = river & ~reaches[mid]
+    if not stray.any():
+        return width
+    width = width.copy()
+    wf, drawf = width.ravel(), draw.ravel()
+    # Reaching the sea, a lake, or a channel that itself reaches one. Joining a
+    # second stray is not an escape: both ends still hang, and taking any river
+    # cell as the target leaves them chained together in mid-slope.
+    water = ((lake_mask | sea) | (river & reaches[mid])).ravel()
+    for i in np.unique(mid[stray]):
+        cells = np.flatnonzero((mid == i).ravel() & (wf > 0))
+        c = int(cells[np.argmax(wf[cells])])     # widest cell: the downstream end
+        chan_w = float(wf[c])
+        trail = []
+        for _ in range(budget):
+            nxt = int(drawf[c])
+            if nxt == c:
+                break
+            c = nxt
+            if water[c]:
+                for t in trail:
+                    _disc(width, t // w, t % w, chan_w)
+                trail = None
+                break
+            trail.append(c)
+        if trail is not None:                     # never found water: drop it
+            wf[cells] = 0.0
+    return width
+
+
 def rasterize(paths, widths, shape):
     """Stamp every path into a width field, sampling densely enough to stay joined."""
     width_map = np.zeros(shape)
@@ -417,20 +556,36 @@ def build(h, cfg, rng, sea_level=0.0, routed=None, runoff=None, evap=None):
     level = np.where(lake_id > 0, level, 0.0)
 
     thresh = cfg.river_threshold * h.size
-    # Channels stop at the *basin*, not at the water's edge. Every cell of a
-    # basin is routed to its exit so the balance sees one inflow, and a path
-    # traced through the dry margin of a part-full lake would follow that
-    # shortcut - drawing a ruler-straight river a dozen cells long across the
-    # lake bed. Measured on seed 3 at 384x288: one 14.6-cell step, against 1.5
-    # for every other path on the map.
-    channel = (flow >= thresh) & (h > sea_level) & (r.lake_id == 0)
+    # A channel stops at the water's edge, not at the rim of the basin holding
+    # it. Basin cells are crossed instead: they are handed to the tracer as
+    # `cross` and walked along `draw`, which descends to the lake rather than to
+    # the spill. Cutting them out of `channel` instead - which is what this did
+    # while the geometry still followed the balance's shortcut - left a quarter
+    # of the river cells on seed 1 at 512x384 in the middle of open ground, a
+    # median of 4 to 7 cells short of the pond they were running into.
+    lake_mask = lake_id > 0
+    sea = h <= sea_level
+    # Anything the fill had to raise is crossable, not just the basins big and
+    # deep enough to be lakes: `lake_min_depth` and `lake_min_area` drop the
+    # small ones, and a river running into one of those then stopped dead in a
+    # dimple that holds no water. Every stray left after the rest of this was in
+    # one - five of the five remaining pieces at 1024x768 on seed 3.
+    hollow = (filled - h > 1e-9) & ~lake_mask & ~sea
+    draw = _draw_receivers(r.plain, (r.lake_id > 0) & ~lake_mask, lake_mask, r.lake_id)
+    channel = (flow >= thresh) & ~sea & ~lake_mask
     # The top and bottom rows are drainage outlets, so water pools along them
     # and draws a ruler-straight river down the map edge. Cut them out.
     channel[:2] = channel[-2:] = False
 
     paths, widths = [], []
-    for pts in polylines(flow, rec, channel):
+    for pts in polylines(flow, draw, channel, cross=hollow):
         q = flow[pts[:, 0].astype(int), pts[:, 1].astype(int)]
+        # Running maximum, because discharge only grows downstream and the field
+        # does not say so everywhere: on a basin floor the accounting graph has
+        # already sent the water to the basin's exit, so the cells a river
+        # crosses to reach the lake read about one cell's worth. Undamped, a
+        # trunk narrows to a thread for the last few cells of its run.
+        q = np.maximum.accumulate(q)
         # Hydraulic geometry: width goes as a power of discharge. The classic
         # exponent is a half; a little under that holds the trunks in without
         # touching the headwaters, which sit on the 0.7 floor either way.
@@ -469,6 +624,7 @@ def build(h, cfg, rng, sea_level=0.0, routed=None, runoff=None, evap=None):
     # feeds. Masked after the incision, which already excluded both and should
     # keep cutting the bed right up to the shoreline.
     width = width * ((h > sea_level) & (lake_id == 0))
+    width = _connect_strays(width, lake_mask, h <= sea_level, draw, cfg)
 
     return h, Water(filled=filled, flow=flow, receivers=rec, lake_id=lake_id,
                     lake_level=level, lake_depth=depth, width=width, polylines=paths,
