@@ -34,7 +34,8 @@ python test_terrain.py       # invariant checks
 | texture | `terrain/elevation.py` | warped ridged fBm, amplitude weighted by local relief and tectonic activity |
 | coastline | `terrain/elevation.py` | sea level by quantile, a bounded rise per cell away from the shore, slope-compensated fray and drowned inlets on continent-ocean margins, then noise frays the shoreline |
 | erosion | `terrain/hydrology.py` | thermal creep, depression filling, D8 routing, flow accumulation, stream-power incision, repeated |
-| climate | `terrain/climate.py` | zonal rain belts, moisture marched downwind for orographic shadows, runoff and evaporation fields |
+| temperature | `terrain/climate.py` | latitude curve, moist-dependent lapse rate, continentality damped by sea ice |
+| climate | `terrain/climate.py` | moisture capacity from sea surface temperature, zonal rain belts, moisture marched downwind for orographic shadows, runoff and evaporation fields |
 | lakes and rivers | `terrain/rivers.py` | lake water balance, outlet carving, polyline extraction, meandering, discharge-based width, channel incision |
 | biomes | `terrain/climate.py` | temperature from latitude, lapse rate and continentality; biomes from temperature against rain relative to evapotranspiration |
 
@@ -248,13 +249,27 @@ every plate field and `world.water` every water field, including the per-node
 Rain sets two things: how much water each cell contributes to the network, and
 how hard a lake has to work to stay wet. Both come out of one small model.
 
-Zonal belts give the latitudes - wet on the equator, dry in the horse
-latitudes, wet again at the storm tracks, dry at the poles, as
-`cos(3 pi lat)` - and the latitude they key on wobbles, the same trick the
-polar taper uses, so they do not read as three ruler-straight stripes.
+How much the air can carry comes from the temperature under it, at
+Clausius-Clapeyron's own 7% per degree (`rain_capacity`): a tropical ocean hands
+its air several times what a polar one does. That is why the equator is wet
+without a band being drawn there, and it is the reason temperature is computed
+*before* the rain now rather than after it.
+
+Zonal belts keep the job only they can do. Wet on the equator, dry in the horse
+latitudes, wet again at the storm tracks, as `cos(3 pi lat)`, with the latitude
+they key on wobbling so they do not read as three ruler-straight stripes - but
+the part that matters is the dry subtropics, which come from air *descending* at
+30 degrees and not from how cold it is there. `rain_belts` went from 0.75 to
+0.9 when capacity arrived, because the two were both drawing the equatorial
+maximum and only one of them can also dig the trough at 30: measured over two
+seeds at 384x288, desert ran 18% of land at 0.75, 23% at 0.85 and 29% at 0.95.
 The belt scales the whole rain rate rather than its flat part: applied only to
 `rain_base` it is invisible wherever there is relief, because the orographic
 term is several times the base on any real slope.
+
+The latitudinal profile that falls out, as mean runoff over land: **1.75** in
+the tropics, **0.41** at 30 degrees, **0.75** at 60. That shape used to come
+entirely from one hand-drawn cosine.
 
 Then moisture is marched downwind, one column at a time. Winds are zonal -
 easterly in the tropics and at the poles, westerly between - so the march runs
@@ -384,6 +399,34 @@ Two layers draw it - `temperature`, absolute so that freezing sits at a fixed
 place on the ramp, and `biomes` - and the main relief layer mixes the biome
 colour into its hypsometric tint at `biome_tint`, so height and vegetation read
 off the same map.
+
+## Height, and how fast it cools
+
+`temp_lapse` is what a cell loses per unit of height, and it is not one number
+any more. Rising air cools at about 9.8 C/km while it stays unsaturated and near
+5 once it is condensing, because the latent heat it gives up pays back part of
+the expansion - so a wet windward slope loses height far more gently than a
+desert range at the same latitude, and its tree line rides up with it.
+`temp_lapse_moist` is the spread either side: 0.25 gives a dry-to-wet ratio of
+1.67 against the 1.96 the two adiabats really differ by.
+
+It keys on the *rank* of the local runoff within this world's land, not on its
+value, so the middle cell keeps exactly `temp_lapse` and the calibration that
+number was chosen for survives being made local. The rank is the midpoint of the
+two insertion points rather than one side of them - they agree on a continuous
+field, but ground at exactly the same runoff has every tied cell taking the top
+of its own run, which drags the mean rank above a half and biases the whole
+map's lapse rate.
+
+That makes the stage order a loop on paper: rain needs temperature for its
+capacity, and temperature needs rain for its lapse rate. It is cut by running
+temperature twice - once at the flat rate to feed the rain, once with the runoff
+to feed the biomes - which costs 0.04 s at 384x288. Both passes take their own
+generator off the seed rather than the shared stream: drawing here would shift
+every later draw and move the river meanders on every seed the generator has
+ever made. Verified - `height_pre` and `height_eroded` hash identically to the
+commit before this one, while the rivers move, which is what a change to the
+rain is supposed to do.
 
 ## What the temperature slider moves
 

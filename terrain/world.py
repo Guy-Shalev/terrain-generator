@@ -120,12 +120,22 @@ class Config:
     rain_base: float = 0.006        # moisture a land cell takes out of the air
     rain_orog: float = 1.0          # extra rain per unit of upwind climb
     rain_ocean_gain: float = 0.08   # moisture an ocean cell puts back
-    rain_belts: float = 0.75        # depth of the zonal wet/dry bands, 0 = flat
+    # Depth of the zonal wet/dry bands, 0 = flat. Raised from 0.75 when the
+    # capacity term arrived: temperature now supplies the wet equator and the
+    # dry pole, so what is left for the belts is the job only they can do - the
+    # subtropical dry band, which comes from air descending at 30 degrees and
+    # not from how cold it is there. Measured over two seeds at 384x288, desert
+    # as a share of land ran 18% at 0.75, 23% at 0.85 and 29% at 0.95.
+    rain_belts: float = 0.9
     rain_wobble: float = 0.10       # how far the bands wander, in latitude
     rain_wobble_periods: float = 2.0
     rain_recycle: float = 0.55      # share of rain a land cell puts back up
     rain_blur: float = 2.5          # px; weather is not one cell wide
     rain_evap_cap: float = 0.2      # driest runoff `lake_evap` is divided by
+    # Fractional rise in what the air can carry, per degree of the temperature
+    # under it. Clausius-Clapeyron's own number, and the reason the equator is
+    # wet without anyone drawing a band there.
+    rain_capacity: float = 0.07
     temp_equator: float = 27.0      # mean annual C at the equator, at sea level
     temp_pole: float = -25.0        # ditto at the poles
     # Global shift; the viewer's temperature slider. Rain follows it through
@@ -144,6 +154,11 @@ class Config:
     # 2500 m - and at a true lapse rate that tenth freezes and the map comes out
     # a third taiga. Lower it further and the tropics eat everything.
     temp_lapse: float = 38.0
+    # Spread either side of that with local humidity: dry air cools at about
+    # 9.8 C/km on the way up, saturated air at 5, because condensation pays back
+    # part of the expansion. 0.25 gives a dry-to-wet ratio of 1.67 against the
+    # 1.96 the two adiabats really differ by. 0 is the flat rate.
+    temp_lapse_moist: float = 0.25
     temp_wobble: float = 0.06       # how far the isotherms wander, in latitude
     temp_wobble_periods: float = 2.0
     temp_swing: float = 22.0        # seasonal half-range at the pole, deep inland
@@ -354,7 +369,17 @@ def generate(cfg=None, verbose=True, on_stage=None, **overrides):
         cfg.erosion_n, cfg.thermal_iters, cfg.talus))
     # Rain is read off the eroded surface, which is the one the rivers will run
     # on: the ranges that cast the shadows are the ones erosion left standing.
-    runoff, evap = stage("climate", lambda: climate.runoff(eroded, cfg, rng))
+    # Temperature comes first now, because the rain reads it: the air over a
+    # warm sea carries several times what polar air does. It takes its own
+    # stream off the seed rather than the shared one - drawing its noise here
+    # would shift every later draw and move the river meanders on every seed the
+    # generator has ever made - and the two passes take a fresh one each so they
+    # see the same wobble. The first pass runs at the flat lapse rate, since the
+    # humidity that bends it is what this rain is about to produce.
+    sst = stage("temperature", lambda: climate.temperature(
+        eroded, cfg, np.random.default_rng([cfg.seed, 1]))[0])
+    runoff, evap = stage("climate", lambda: climate.runoff(eroded, cfg, rng,
+                                                           temp=sst))
     # Erosion signs off by filling, routing and accumulating its finished
     # surface, and the river stage opens by needing exactly that. Hand it over
     # instead of letting it be recomputed.
@@ -363,12 +388,13 @@ def generate(cfg=None, verbose=True, on_stage=None, **overrides):
         runoff=runoff, evap=evap))
 
     def biomes():
-        # Last, for two reasons. It draws from `rng`, and running it before the
-        # river stage would move the meander noise off every seed it has ever
-        # made. And it wants the finished surface: rivers incise, a coastal cell
-        # can cross sea level doing it, and the biome grid's idea of the
-        # coastline has to be `world.land`'s.
-        t, sw = climate.temperature(h, cfg, rng)
+        # Still last, because it wants the finished surface: rivers incise, a
+        # coastal cell can cross sea level doing it, and the biome grid's idea
+        # of the coastline has to be `world.land`'s. This pass gets the runoff,
+        # so its lapse rate is the moist one - a wet windward slope loses height
+        # far more gently than a desert range at the same latitude.
+        t, sw = climate.temperature(h, cfg, np.random.default_rng([cfg.seed, 1]),
+                                    humid=runoff)
         return t, sw, climate.biomes(h, t, sw, runoff, cfg)
 
     temp, swing, biome = stage("biomes", biomes)

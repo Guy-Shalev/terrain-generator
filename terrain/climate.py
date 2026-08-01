@@ -29,15 +29,18 @@ def _belts(shape, cfg, rng):
     return 1.0 - cfg.rain_belts * (1.0 - band) * 0.5
 
 
-def _march(h, land, belts, cfg):
+def _march(h, land, belts, cap, cfg):
     """Blow moisture from x=0 to x=w, raining as it goes. One row per latitude.
 
     The lap before the one that counts is there because the world is a cylinder:
     there is no upwind edge to start dry at, so the first pass is thrown away
     and only the state it leaves behind is kept.
+
+    `cap` is how much moisture the air over each cell can hold, from the sea
+    surface temperature under it.
     """
     hh, w = h.shape
-    m = np.ones(hh)
+    m = cap[:, -1].copy()
     rain = np.zeros((hh, w))
     for lap in range(2):
         prev = h[:, -1]
@@ -60,17 +63,41 @@ def _march(h, land, belts, cfg):
             # rates that give a decent rain shadow, half of every landmass came
             # out at under a seventh of the mean and the rivers there vanished.
             m = m - r + np.where(wet, r * cfg.rain_recycle,
-                                 (1.0 - m) * cfg.rain_ocean_gain)
+                                 (cap[:, x] - m) * cfg.rain_ocean_gain)
             if lap:
                 rain[:, x] = r
     return rain
 
 
-def rainfall(h, cfg, rng, sea_level=0.0):
+def capacity(temp, cfg, sea_level=0.0, h=None):
+    """How much moisture the air can carry, from the temperature under it.
+
+    Clausius-Clapeyron: saturation vapour pressure rises about 7% per degree, so
+    a tropical ocean hands its air several times what a polar one does. This is
+    what puts the wet band on the equator and the dry one at the pole, and it is
+    a better source for that than the zonal belt curve, which had to draw both
+    from a cosine. What the belts keep is the job only they can do - the dry
+    subtropics, which come from air *descending* at 30 degrees, not from how
+    cold it is there.
+
+    Normalised to average one over the sea, so this changes where the rain falls
+    and not how much of it there is; `runoff` renormalises over land anyway.
+    """
+    cap = np.exp(cfg.rain_capacity * (temp - float(temp.mean())))
+    if h is not None:
+        sea = h <= sea_level
+        if sea.any():
+            cap = cap / max(1e-6, float(cap[sea].mean()))
+    return cap
+
+
+def rainfall(h, cfg, rng, sea_level=0.0, temp=None):
     """Rain per cell. Winds are zonal: easterly in the tropics and at the poles,
     westerly in between, which is why the marching is done in two groups."""
     land = h > sea_level
     belts = _belts(h.shape, cfg, rng)
+    cap = (np.ones_like(h) if temp is None
+           else capacity(temp, cfg, sea_level, h))
     lat = np.abs(grid.latitude(h.shape))[:, 0]
     westerly = (lat > 1 / 3) & (lat < 2 / 3)
 
@@ -79,7 +106,8 @@ def rainfall(h, cfg, rng, sea_level=0.0):
         if not sel.any():
             continue
         sl = slice(None, None, -1) if flip else slice(None)
-        out = _march(h[sel][:, sl], land[sel][:, sl], belts[sel][:, sl], cfg)
+        out = _march(h[sel][:, sl], land[sel][:, sl], belts[sel][:, sl],
+                     cap[sel][:, sl], cfg)
         rain[sel] = out[:, sl]
     # Weather is not a cell wide. The orographic term keys on the climb between
     # two neighbours, so undamped it dumps a year of rain on one row of cells
@@ -88,7 +116,7 @@ def rainfall(h, cfg, rng, sea_level=0.0):
     return grid.blur(rain, cfg.rain_blur)
 
 
-def runoff(h, cfg, rng, sea_level=0.0):
+def runoff(h, cfg, rng, sea_level=0.0, temp=None):
     """Rainfall as accumulation weights: mean one over land, zero at sea.
 
     Returns `(runoff, evaporation)`. Evaporation is what a cell of lake surface
@@ -99,7 +127,7 @@ def runoff(h, cfg, rng, sea_level=0.0):
     what the sky does not deliver the land cannot shed.
     """
     land = h > sea_level
-    rain = rainfall(h, cfg, rng, sea_level)
+    rain = rainfall(h, cfg, rng, sea_level, temp)
     if not land.any():
         return np.zeros_like(h), np.full_like(h, cfg.lake_evap)
     mean = max(1e-9, float(rain[land].mean()))
@@ -108,7 +136,35 @@ def runoff(h, cfg, rng, sea_level=0.0):
     return out, evap
 
 
-def temperature(h, cfg, rng, sea_level=0.0):
+def _lapse(humid, land, cfg):
+    """C lost per unit of height, steeper where the air is dry.
+
+    Rising air cools at about 9.8 C/km while it stays unsaturated and near 5
+    once it is condensing, because the latent heat it gives up pays back part of
+    the expansion. So a wet windward slope loses height far more gently than a
+    desert range at the same latitude, and the tree line rides up with it.
+
+    Keyed on the rank of the local runoff within this world's land rather than
+    on its value: the rank has a median of exactly one half by construction, so
+    the middle cell keeps `temp_lapse` and the calibration that number was
+    chosen for survives. `temp_lapse_moist` is the spread either side of it -
+    0.25 gives a dry-to-wet ratio of 1.67 against the 1.96 the two adiabats
+    really differ by, which is as far as it can go before the wettest ranges
+    stop having a snow line at all.
+    """
+    if humid is None or not land.any():
+        return cfg.temp_lapse
+    vals = np.sort(humid[land])
+    # Midpoint of the two insertion points, not one side of them. They agree on
+    # a continuous field, but a field with ties - flat ground at exactly the same
+    # runoff - has every tied cell taking the top of its own run, which drags the
+    # mean rank above a half and quietly biases the whole map's lapse rate.
+    rank = 0.5 * (np.searchsorted(vals, humid, side="left") +
+                  np.searchsorted(vals, humid, side="right")) / max(1, len(vals))
+    return cfg.temp_lapse * (1.0 + cfg.temp_lapse_moist * (1.0 - 2.0 * rank))
+
+
+def temperature(h, cfg, rng, sea_level=0.0, humid=None):
     """Mean annual temperature and the seasonal half-range, both in degrees C.
 
     Three terms. Latitude sets the baseline, falling from the equator to the
@@ -146,7 +202,7 @@ def temperature(h, cfg, rng, sea_level=0.0):
     if land.any():
         weight = weight / max(1e-6, float(weight[land].mean()))
     temp = (base + cfg.temp_offset * weight
-            - cfg.temp_lapse * np.maximum(h - sea_level, 0.0))
+            - _lapse(humid, land, cfg) * np.maximum(h - sea_level, 0.0))
     # Saturating rather than linear: the moderating reach of an ocean is spent
     # within a few hundred km of it, and past that one more cell inland changes
     # nothing. Linear in the distance instead, the middle of a big continent

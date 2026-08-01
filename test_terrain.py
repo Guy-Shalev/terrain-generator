@@ -346,6 +346,56 @@ def test_lakes_and_rivers():
     assert (w.height <= w.height_eroded + 1e-9).all()
 
 
+def test_warm_seas_feed_more_rain():
+    """The air over a warm sea carries more, so the tropics are wet without a
+    band being drawn there. Belts off, so capacity is the only thing left."""
+    h = np.full((160, 240), -0.4)
+    h[:, 90:150] = 0.05                     # a flat continent, nothing to lift air
+    kw = dict(width=240, height=160, ref_width=240, rain_belts=0.0)
+    temp, _ = climate.temperature(h, Config(**kw), np.random.default_rng(0))
+    land = h > 0
+    lat = np.abs(grid.latitude(h.shape))
+
+    def by_latitude(cap):
+        ro, _ = climate.runoff(h, Config(rain_capacity=cap, **kw),
+                               np.random.default_rng(0), temp=temp)
+        warm = land & (lat < 0.25)
+        cold = land & (lat > 0.75)
+        return float(ro[warm].mean()), float(ro[cold].mean())
+
+    warm, cold = by_latitude(0.07)
+    assert warm > 2 * cold, f"tropics {warm:.2f} against poles {cold:.2f}"
+    flat_warm, flat_cold = by_latitude(0.0)
+    assert abs(flat_warm - flat_cold) < abs(warm - cold), \
+        "capacity 0 spread the rain as widely as Clausius-Clapeyron did"
+
+
+def test_wet_slopes_lose_height_gently():
+    """A saturated updraught cools at about half the rate a dry one does, so the
+    same plateau is warmer on the wet side of a map than on the dry side."""
+    h = np.full((120, 200), 0.05)
+    h[40:80, :] = 0.45                      # one plateau, spanning both climates
+    runoff = np.zeros_like(h) + 0.2
+    runoff[:, 100:] = 2.0                   # dry half, wet half
+    top = np.zeros(h.shape, bool)
+    top[40:80] = True
+    dry, wet = top & (runoff < 1), top & (runoff > 1)
+
+    def plateau(moist):
+        cfg = Config(width=200, height=120, ref_width=200,
+                     temp_lapse_moist=moist, temp_wobble=0.0)
+        t, _ = climate.temperature(h, cfg, np.random.default_rng(0), humid=runoff)
+        return float(t[dry].mean()), float(t[wet].mean())
+
+    d, w = plateau(0.25)
+    assert w > d + 3.0, f"wet plateau {w:.1f} C, dry {d:.1f} C - no difference"
+    d0, w0 = plateau(0.0)
+    assert abs(w0 - d0) < 0.05, "the flat rate is not flat"
+    # The middle of the distribution keeps `temp_lapse`, so the calibration the
+    # number was chosen for survives being made local.
+    assert abs((d + w) / 2 - (d0 + w0) / 2) < 0.6
+
+
 def test_temperature_slider_moves_a_whole_climate():
     """Warming must move rain, the gradient and the ice with it.
 
