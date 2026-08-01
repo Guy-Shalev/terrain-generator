@@ -352,6 +352,37 @@ def test_lakes_and_rivers():
     assert (w.height <= w.height_eroded + 1e-9).all()
 
 
+def test_rain_weighted_erosion_carves_the_wet_side_harder():
+    """Two identical flanks, rain on one of them, and only one gets dissected.
+
+    A ridge with sea either side, so both flanks drain the same way down the
+    same slope from the same height. The only thing told apart is what falls on
+    them. `k` is well above the configured one on purpose: this is asking
+    whether the weighting reaches the incision at all, not whether the shipped
+    tuning makes it visible - which is a separate question, and the answer is
+    that at `erosion_k` the fluvial term is small next to thermal creep.
+    """
+    y, x = np.mgrid[0:96, 0:160]
+    h = 0.6 - 0.012 * np.abs(x - 80) + np.random.default_rng(0).normal(0, 0.004, (96, 160))
+    wet = np.where(x < 80, 1.8, 0.2)        # west flank soaked, east flank dry
+    wet = np.where(h > 0, wet, 0.0)
+
+    def cut(weights):
+        out = hydrology.stream_power(h.copy(), 0.0, passes=4, k=0.06, m=0.5, n=1.0,
+                                     thermal_iters=12, talus=0.045, weights=weights)[0]
+        d = h - out
+        flank = (h > 0.1)
+        return d[flank & (x < 80)].mean(), d[flank & (x > 80)].mean()
+
+    fw, fd = cut(None)
+    ww, wd = cut(wet)
+    assert abs(fw - fd) < 0.25 * max(fw, fd), \
+        f"unweighted flanks should erode alike: {fw:.4f} vs {fd:.4f}"
+    assert ww / wd > 1.5 * (fw / fd), \
+        f"rain did not lopside the ridge: {ww / wd:.2f} against {fw / fd:.2f}"
+    assert wd < fd, "the dry flank should be spared, not merely out-cut"
+
+
 def test_currents_tell_the_two_coasts_apart():
     """A gyre is cold down the east side of its basin and warm up the west one.
 
@@ -383,13 +414,15 @@ def test_currents_change_the_map():
     """Measured, because a field that nothing downstream reads is decoration.
 
     Same seed either way, and the current field draws no random numbers, so the
-    terrain underneath is identical and the cells compare one to one.
+    surface going *into* erosion is identical and the cells compare one to one.
+    It does not survive erosion: currents reach the rain, the rain weights the
+    carving, and the finished terrain is theirs too.
     """
     kw = dict(seed=7, width=192, height=144, erosion_passes=2)
     off = generate(Config(current_cold=0.0, current_warm=0.0, **kw), verbose=False)
     on = generate(Config(**kw), verbose=False)
-    assert np.array_equal(off.height_eroded, on.height_eroded), \
-        "currents moved the terrain; they may only move the climate"
+    assert np.array_equal(off.height_pre, on.height_pre), \
+        "currents moved the terrain before erosion; they may only move the climate"
     land = on.land
     d = np.abs(on.runoff - off.runoff)[land] / np.maximum(off.runoff[land], 1e-6)
     assert np.percentile(d, 90) > 0.05, f"currents barely touched the rain: {d.max():.3f}"

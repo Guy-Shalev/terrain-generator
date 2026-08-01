@@ -187,14 +187,21 @@ def accumulate(filled, rec, weights=None, gate=None):
 
 
 def stream_power(h, sea_level=0.0, passes=4, k=0.06, m=0.5, n=1.0,
-                 thermal_iters=12, talus=0.045):
-    """Alternate hillslope creep and fluvial incision. Returns (h, filled, acc)."""
+                 thermal_iters=12, talus=0.045, weights=None):
+    """Alternate hillslope creep and fluvial incision. Returns (h, filled, acc).
+
+    `weights` is what each cell contributes to the water, `None` meaning one
+    apiece - which is what this did for a long time, and it carved a desert as
+    hard as a rainforest. Passed the rain instead, a range comes out lopsided:
+    the windward side is cut into valleys and the lee keeps its bulk. The field
+    averages one over land, so the magnitude `k` is tuned against survives.
+    """
     for p in range(passes):
         land = h > sea_level - 0.02
         h = thermal(h, iters=thermal_iters, talus=talus, mask=land)
         filled = fill_depressions(h, sea_level)
         rec, rec_d, _ = flow_routing(filled)
-        acc = accumulate(filled, rec)
+        acc = accumulate(filled, rec, weights)
 
         flat = h.ravel()
         slope = np.clip((flat - flat[rec.ravel()]) / rec_d.ravel(), 0, None)
@@ -206,5 +213,5 @@ def stream_power(h, sea_level=0.0, passes=4, k=0.06, m=0.5, n=1.0,
         h = np.where(land, grid.blur(h, 0.4), h)
     filled = fill_depressions(h, sea_level)
     rec, rec_d, _ = flow_routing(filled)
-    acc = accumulate(filled, rec)
+    acc = accumulate(filled, rec, weights)
     return h, filled, acc, rec

@@ -33,7 +33,8 @@ python test_terrain.py       # invariant checks
 | hotspots | `terrain/elevation.py` | island chains smeared along each plate's own motion |
 | texture | `terrain/elevation.py` | warped ridged fBm, amplitude weighted by local relief and tectonic activity |
 | coastline | `terrain/elevation.py` | sea level by quantile, a bounded rise per cell away from the shore, slope-compensated fray and drowned inlets on continent-ocean margins, then noise frays the shoreline |
-| erosion | `terrain/hydrology.py` | thermal creep, depression filling, D8 routing, flow accumulation, stream-power incision, repeated |
+| pre-rain | `terrain/climate.py` | a first rain pass on the un-eroded surface, to weight the carving |
+| erosion | `terrain/hydrology.py` | thermal creep, depression filling, D8 routing, rain-weighted flow accumulation, stream-power incision, repeated |
 | temperature | `terrain/climate.py` | latitude curve, moist-dependent lapse rate, continentality damped by sea ice |
 | climate | `terrain/climate.py` | moisture capacity from sea surface temperature, gyre currents warming and cooling it by basin side, zonal rain belts, moisture marched downwind for orographic shadows, runoff and evaporation fields |
 | lakes and rivers | `terrain/rivers.py` | lake water balance, outlet carving, polyline extraction, meandering, discharge-based width, channel incision |
@@ -335,9 +336,41 @@ The field is normalised to average one over land, which is what lets it drop
 into `hydrology.accumulate` as weights without moving what `river_threshold`
 means - drainage area was already that field with every weight at one. Rivers
 are drawn from the weighted flow, so they thin and vanish in a rain shadow.
-Erosion still runs on unweighted flow: wet slopes ought to carve faster, but
-that is a change to every tuned number in the erosion stage rather than a
-change to this one.
+
+Erosion takes the same weights, off a `pre-rain` pass run on the surface as it
+stands before erosion. Chicken and egg: the rain that ought to weight the
+carving is the rain the finished ranges cast their shadows with, and those
+ranges do not exist yet - but erosion lowers a range and sharpens it without
+moving where it is, so the shadow falls in the same place either way. Both rain
+passes take the same derived stream, so the carving is weighted by the bands
+the finished map is banded on rather than by ones offset from them by up to
+`rain_wobble` of latitude.
+
+**`erosion_k` had to move for this to be worth anything.** At the 0.0018 it
+sat at, the fluvial term is small next to thermal creep, and weighting it by
+rainfall took the cut on wet high ground from 4.2x the cut on dry ground to
+only 4.7x - eleven percent, with the surface itself moving 0.0001 at the median
+in a range spanning 1.8. Measured over three seeds at 384x288:
+
+| `erosion_k` | wet/dry cut, flat weights | with rain | land |
+|---|---|---|---|
+| 0.0018 | 4.20 | 4.67 (+11%) | 28.0% |
+| **0.009 (shipped)** | **3.07** | **4.35 (+42%)** | **27.9%** |
+| 0.036 | 2.01 | 3.87 (+92%) | 27.5% |
+| 0.108 | 1.57 | 3.54 (+126%) | 26.6% |
+
+Note which column the weighting improves. Raising `k` on flat weights makes a
+range *less* lopsided, not more - more incision everywhere evens the two flanks
+out - and it is only with the rain in the accumulation that the extra carving
+lands on the side that earns it. At 0.009 that is 3.07 against 4.35.
+
+Land fraction holds all the way up the column, and at the shipped value the
+mean cut is 0.0031 against 0.0019, so the extra carving arrives as texture on
+the high ground rather than as a drowned world. Per seed the spread is wide -
+7.92 against 5.94 on seed 7, 1.52 against 0.94 on seed 3 - because how much
+rain shadow a world has at all depends on where its ranges stand relative to
+the wind. The weighting costs 0.16 s of a 2.4 s build, all of it the extra rain
+pass.
 
 Evaporation is `lake_evap` divided by the local runoff, floored at
 `rain_evap_cap`, so the same basin is a full lake in a wet belt and a pan in a
@@ -780,9 +813,9 @@ the sea's temperature but not the land's: a warm current makes the coast beside
 it rainier and not milder, because advecting that heat inland is a term of its
 own and this has none. Mediterranean shrubland is placed as subtropical semiarid, which is the
 right corner of the diagram but not the real test, since the real test is a dry
-summer. Climate feeds nothing back: erosion still runs on unweighted flow, so a
-soaked windward slope carves no faster than the desert behind it, and the biome
-map has no say in where a river goes. Nothing goes fully dry either - a
+summer. Climate feeds back only as far as the rain: erosion is weighted by it now, and
+`erosion_k` was raised so that weighting could reach the surface, but the biome
+map still has no say in where a river goes. Nothing goes fully dry either - a
 basin catches at least its own footprint, so playas need evaporation to beat the
 rain locally rather than a lake-surface rate that is merely high. Lake outflow is
 carved rather than simulated: the level responds to a water balance now, the
