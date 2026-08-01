@@ -155,6 +155,84 @@ def test_rain_shadow_and_normalisation():
     assert evap[land][ro[land] < 0.5].mean() > evap[land][ro[land] > 1.5].mean()
 
 
+def test_temperature_gradients():
+    """Latitude sets it, height takes off it, and the sea holds the year steady.
+
+    The third one is the reason `temperature` returns a pair. Mean annual alone
+    cannot tell a maritime coast from an interior at the same latitude, and it
+    is the interior's summer - not its average - that decides whether anything
+    grows there.
+    """
+    h = np.full((160, 240), -0.4)
+    h[:, 60:180] = 0.05                      # a continent, 120 cells across
+    h[60:100, 100:140] = 0.45                # a plateau in the middle of it
+    cfg = Config(width=240, height=160, ref_width=240, temp_wobble=0.0)
+    t, sw = climate.temperature(h, cfg, np.random.default_rng(0))
+
+    assert t[80].mean() > t[0].mean() and t[80].mean() > t[-1].mean(), \
+        "the equator must be warmer than either pole"
+    # The plateau against flat land on the same rows, clear of it.
+    lifted, flat = t[70:90, 110:130].mean(), t[70:90, 70:90].mean()
+    drop = cfg.temp_lapse * 0.40
+    assert abs((flat - lifted) - drop) < 1.0, \
+        f"lapse rate is off: {flat - lifted:.1f}C over 0.40 of height, want {drop:.1f}"
+
+    # Same rows, so the same latitude and the same share of the pole-ward
+    # swing; all that differs is how far the sea is.
+    coast, interior = sw[20:60, 62:66].mean(), sw[20:60, 118:122].mean()
+    assert interior > coast * 1.5, \
+        f"continentality does nothing: coast {coast:.1f}C vs interior {interior:.1f}C"
+    assert sw.min() >= 0.0, "a seasonal half-range cannot be negative"
+    assert sw[5:15].mean() > sw[75:85].mean(), \
+        "the year must swing further at the pole than at the equator"
+
+
+def test_biome_placement():
+    """The classification must key on rain *relative to heat*, not on rain.
+
+    Two cells with the same rainfall, one hot and one cold, are not the same
+    biome: the hot one evaporates its way to desert while the cold one is
+    merely dry. That division is the whole difference between this and a plain
+    temperature-by-precipitation lookup, so it gets its own assertion.
+    """
+    shape = (5, 4)
+    h = np.full(shape, 0.1)
+    # No pre-blur: this grid is smaller than the kernel, and what is under test
+    # is the classification, not the smoothing.
+    cfg = Config(width=4, height=5, ref_width=4, biome_blur=0.0)
+    # runoff of 1.0 is the land average, so `precip_mean_mm` mm of rain.
+    temp = np.array([[28.0], [28.0], [4.0], [-30.0], [10.0]]) + np.zeros(shape)
+    runoff = np.array([[3.0], [0.25], [0.25], [1.0], [0.08]]) + np.zeros(shape)
+    swing = np.zeros(shape)
+    b = climate.biomes(h, temp, swing, runoff, cfg)[:, 0]
+
+    assert b[0] == climate.TROPICAL_RAINFOREST, "hot and soaked is not rainforest"
+    assert b[1] == climate.HOT_DESERT, "hot and dry is not desert"
+    # Rows 1 and 2 get *the same rainfall*, 24 degrees apart. A lookup on
+    # millimetres has to return the same biome for both. Dividing by what the
+    # heat can evaporate makes the cold one merely damp - and it is that one
+    # assertion which fails if the PET term is ever dropped.
+    assert b[2] not in (climate.HOT_DESERT, climate.COLD_DESERT), \
+        "the same rain that leaves a desert at 28C must not at 4C"
+    assert b[3] == climate.ICE, "nothing above freezing all year must be ice"
+    assert b[4] == climate.COLD_DESERT, "cold and genuinely arid is cold desert"
+    assert climate.biomes(np.full(shape, -0.1), temp, swing, runoff, cfg).max() \
+        == climate.OCEAN, "below sea level must be ocean whatever the climate"
+
+    # Tundra is cold *and wet* - the case a moisture axis in millimetres gets
+    # wrong, because in millimetres it looks like desert.
+    cold_wet = climate.biomes(h, np.full(shape, -2.0), np.full(shape, 10.0),
+                              np.full(shape, 0.5), cfg)
+    assert (cold_wet == climate.TUNDRA).all(), \
+        "a cold cell whose summer clears freezing must be tundra, not ice or desert"
+
+    w = generate(Config(width=128, height=96, seed=3), verbose=False)
+    assert w.biome.min() >= 0 and w.biome.max() < len(render.BIOME_COLORS), \
+        "a biome id has no colour"
+    assert ((w.biome != climate.OCEAN) == w.land).all(), \
+        "the biome grid and `world.land` disagree about the coastline"
+
+
 def test_rain_belts():
     """The zonal bands must dry the horse latitudes and not the equator.
 

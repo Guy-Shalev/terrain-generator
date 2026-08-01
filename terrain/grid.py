@@ -102,6 +102,17 @@ def min3x3(a, scratch, out):
     return out
 
 
+def latitude(shape):
+    """Signed latitude per row, -1 at one pole and +1 at the other.
+
+    A column vector, not a full grid: everything that keys on latitude
+    broadcasts against it, and the ones that wobble it add a noise field which
+    broadcasts the row out for them.
+    """
+    h = shape[0]
+    return (np.arange(h) / max(1, h - 1) * 2.0 - 1.0)[:, None]
+
+
 def gradient(a):
     """Central-difference (dy, dx) with the grid's wrap/clamp conventions."""
     dy = (shift(a, 1, 0) - shift(a, -1, 0)) * 0.5

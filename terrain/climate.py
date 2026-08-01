@@ -20,7 +20,7 @@ from . import grid, noise
 def _belts(shape, cfg, rng):
     """Zonal rain factor: three wet bands and three dry ones, wandering."""
     h, w = shape
-    lat = (np.arange(h) / max(1, h - 1) * 2.0 - 1.0)[:, None] + np.zeros((1, w))
+    lat = grid.latitude(shape) + np.zeros((1, w))
     # The bands are latitude circles, and drawn as such they read as three
     # ruler-straight stripes across the map. Same trick the polar taper uses:
     # let the latitude they key on wander.
@@ -71,7 +71,7 @@ def rainfall(h, cfg, rng, sea_level=0.0):
     westerly in between, which is why the marching is done in two groups."""
     land = h > sea_level
     belts = _belts(h.shape, cfg, rng)
-    lat = np.abs(np.arange(h.shape[0]) / max(1, h.shape[0] - 1) * 2.0 - 1.0)
+    lat = np.abs(grid.latitude(h.shape))[:, 0]
     westerly = (lat > 1 / 3) & (lat < 2 / 3)
 
     rain = np.zeros_like(h)
@@ -106,3 +106,131 @@ def runoff(h, cfg, rng, sea_level=0.0):
     out = np.where(land, rain / mean, 0.0)
     evap = cfg.lake_evap / np.clip(np.where(land, out, 1.0), cfg.rain_evap_cap, None)
     return out, evap
+
+
+def temperature(h, cfg, rng, sea_level=0.0):
+    """Mean annual temperature and the seasonal half-range, both in degrees C.
+
+    Three terms. Latitude sets the baseline, falling from the equator to the
+    poles as the square of it. Height takes a lapse rate off that, on land
+    only - the sea surface stands at whatever its latitude says. And distance
+    from the sea sets how far the year swings either side of the mean: water
+    holds its heat and the coast that sits on it barely moves between seasons,
+    while an interior at the same latitude bakes and then freezes.
+
+    That third term is why the pair is returned rather than the mean alone.
+    Mean annual temperature cannot tell taiga from tundra - a Siberian interior
+    averages below freezing and still grows forest, because its summer clears
+    the tree line even though its winter is far worse than any coast's. What
+    decides is the warmest month, and that is `temp + swing`.
+    """
+    lat = grid.latitude(h.shape)
+    # Straight off the row index the isotherms are ruler-straight bands, the
+    # same failure the rain belts have; wobble the latitude they key on.
+    lat = np.clip(lat + cfg.temp_wobble * noise.fbm(
+        h.shape[0], h.shape[1], rng, cfg.temp_wobble_periods, 3), -1.0, 1.0)
+    base = cfg.temp_equator + (cfg.temp_pole - cfg.temp_equator) * lat ** 2
+    temp = base + cfg.temp_offset - cfg.temp_lapse * np.maximum(h - sea_level, 0.0)
+    # Saturating rather than linear: the moderating reach of an ocean is spent
+    # within a few hundred km of it, and past that one more cell inland changes
+    # nothing. Linear in the distance instead, the middle of a big continent
+    # runs away to a swing no latitude justifies.
+    cont = 1.0 - np.exp(-grid.edt(h > sea_level) / max(1e-6, cfg.temp_cont_reach))
+    swing = (cfg.temp_swing * np.abs(lat)
+             * (cfg.temp_maritime + (1.0 - cfg.temp_maritime) * cont))
+    return temp, swing
+
+
+# Biome ids. Ocean is 0, so an empty grid reads as all sea.
+(OCEAN, ICE, TUNDRA, TAIGA, COLD_DESERT, STEPPE, TEMPERATE_FOREST,
+ TEMPERATE_RAINFOREST, SHRUBLAND, HOT_DESERT, SAVANNA, TROPICAL_SEASONAL,
+ TROPICAL_RAINFOREST) = range(13)
+
+BIOME_NAMES = [
+    "ocean", "ice", "tundra", "taiga", "cold desert", "steppe",
+    "temperate forest", "temperate rainforest", "shrubland", "hot desert",
+    "savanna", "tropical seasonal forest", "tropical rainforest",
+]
+
+# Moisture index cuts - rainfall over what the local heat can evaporate.
+# Holdridge's humidity provinces, near enough: under a quarter is desert, over
+# two is rainforest.
+# Shifted up from Holdridge's own cuts, which run 0.25 / 0.5 / 1 / 2, because
+# this generator's rain is narrower than Earth's: the wettest land here gets
+# 2.4x the mean where a real rainforest gets 3 to 5x, and the driest is nowhere
+# near as dry. Left on the textbook numbers the whole map bunches into the two
+# middle bands - deserts came out at 5% of land against Earth's 20%, and
+# tropical rainforest at 1.5% against 13%. These are the same provinces read
+# off a flatter distribution.
+MI_BANDS = (0.4, 0.7, 1.1, 1.8)
+# Mean annual temperature cuts, in C. The top one is 22 and not the 24 a real
+# tropical mean sits above, because the equator here is 27 at sea level and the
+# lapse rate takes the rest: at 24 the tropical column is reachable only below
+# 0.08 of height and within 20 degrees of the line, which came out at 7% of land
+# against Earth's 36%.
+T_BANDS = (0.0, 6.0, 12.0, 17.0, 22.0)
+ICE_C = 0.0     # warmest month below this and nothing ever thaws
+TREE_C = 6.0    # warmest month below this and nothing grows tall
+
+# Short names, so the table below reads as one.
+_CD, _HD, _TU, _TA, _ST, _SH, _SV = (COLD_DESERT, HOT_DESERT, TUNDRA, TAIGA,
+                                     STEPPE, SHRUBLAND, SAVANNA)
+_TF, _TR, _PS, _PR = (TEMPERATE_FOREST, TEMPERATE_RAINFOREST,
+                      TROPICAL_SEASONAL, TROPICAL_RAINFOREST)
+BIOME_MATRIX = np.array([
+    # polar subpolar cool temperate subtropical tropical
+    [_CD, _CD, _CD, _CD, _HD, _HD],     # arid       mi < 0.25
+    [_TU, _TU, _ST, _ST, _SH, _SV],     # semiarid   mi < 0.5
+    [_TU, _TA, _TA, _TF, _PS, _PS],     # subhumid   mi < 1.1
+    # Tropical humid is rainforest and not seasonal forest: potential
+    # evapotranspiration is so high there that clearing 1.1 takes as much
+    # absolute rain as a temperate perhumid cell gets.
+    [_TU, _TA, _TF, _TF, _TF, _PR],     # humid      mi < 1.8
+    [_TU, _TA, _TR, _TR, _PR, _PR],     # perhumid   mi >= 1.6
+], dtype=np.int8)
+
+
+def biomes(h, temp, swing, runoff, cfg, sea_level=0.0):
+    """What grows where: temperature against rain *for that temperature*.
+
+    The moisture axis is not millimetres. `runoff` is already precipitation
+    normalised to average one over land, so a constant turns it back into a
+    depth - but a depth on its own says nothing, because the same rain that
+    keeps a cold place in forest leaves a hot one bare. Divide it by potential
+    evapotranspiration, which Holdridge reads straight off temperature, and the
+    axis becomes how wet somewhere is relative to its own thirst. That single
+    division is what puts the Gobi (cold, dry, and arid) and the tundra (cold,
+    dry, and yet humid) in different biomes instead of painting both as desert.
+
+    Then the two extremes that no matrix handles, because they are set by the
+    warmest month rather than the mean: permanent ice, and the tree line.
+    """
+    # Biotemperature, not the annual mean: the year averaged with every month
+    # below freezing counted as zero, because nothing grows or transpires in
+    # those and averaging them in as negatives credits a cold winter for warmth
+    # it never had. Twelve samples of the seasonal cycle, summed in place rather
+    # than stacked - the stacked version is twelve full grids at once.
+    #
+    # Taking `clip(temp, 0, 30)` instead, as the annual mean, is not a rounding
+    # error: it sends every freezing cell's PET to zero, the moisture index to
+    # infinity, and a quarter of the map to taiga.
+    biotemp = np.zeros_like(temp)
+    for phase in np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False):
+        biotemp += np.clip(temp + swing * np.cos(phase), 0.0, 30.0)
+    biotemp /= 12.0
+    # Floored at Holdridge's own polar line. Below it the cell is ice or tundra
+    # by the overrides at the bottom of this function anyway, and the only job
+    # left for the floor is to keep the division finite.
+    pet = np.maximum(58.93 * biotemp, 58.93 * 1.5)      # mm/yr
+    mi = cfg.precip_mean_mm * runoff / pet
+    # Banded straight off the raw fields, every hill that crosses a cut puts a
+    # lone cell of another biome in the middle of one, and the map comes out
+    # speckled rather than regional. A short blur first costs nothing and only
+    # takes out features narrower than the blur - a range wide enough to have
+    # its own climate is far wider than this, so altitudinal zonation survives.
+    out = BIOME_MATRIX[np.searchsorted(MI_BANDS, grid.blur(mi, cfg.biome_blur)),
+                       np.searchsorted(T_BANDS, grid.blur(temp, cfg.biome_blur))]
+    warmest = temp + swing
+    out = np.where(warmest < TREE_C, TUNDRA, out)
+    out = np.where(warmest < ICE_C, ICE, out)
+    return np.where(h > sea_level, out, OCEAN).astype(np.int8)

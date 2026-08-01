@@ -126,6 +126,39 @@ class Config:
     rain_recycle: float = 0.55      # share of rain a land cell puts back up
     rain_blur: float = 2.5          # px; weather is not one cell wide
     rain_evap_cap: float = 0.2      # driest runoff `lake_evap` is divided by
+    temp_equator: float = 27.0      # mean annual C at the equator, at sea level
+    temp_pole: float = -25.0        # ditto at the poles
+    # Global shift; the viewer's temperature slider. ponytail: warming here
+    # raises evapotranspiration but not rainfall, because `runoff` is normalised
+    # to average one over land and cannot know the world got hotter - so a
+    # hothouse comes out as desert rather than as the wetter place a real one
+    # would be. Fix by scaling `precip_mean_mm` with `temp_offset` if the warm
+    # end of the slider ever needs to be more than a desert world.
+    temp_offset: float = 0.0
+    # C lost per unit of height. Land here runs to about 0.5, and reading that
+    # as a 6 km range puts one height unit at 12 km, so Earth's 6.5 C/km lands
+    # near 78. It is set at half that on purpose: this terrain carries far more
+    # high ground than Earth does - the top tenth of it sits above what would be
+    # 2500 m - and at a true lapse rate that tenth freezes and the map comes out
+    # a third taiga. Lower it further and the tropics eat everything.
+    temp_lapse: float = 38.0
+    temp_wobble: float = 0.06       # how far the isotherms wander, in latitude
+    temp_wobble_periods: float = 2.0
+    temp_swing: float = 22.0        # seasonal half-range at the pole, deep inland
+    temp_maritime: float = 0.35     # share of that swing a coast still gets
+    # px inland over which continentality saturates. Measured on seeds at
+    # 512x384, land runs 10 px from the sea at the median and 39 at the 99th,
+    # so a reach much above 15 leaves even the deepest interior only half
+    # continental and the seasonal swing never arrives.
+    temp_cont_reach: float = 15.0
+    precip_mean_mm: float = 750.0   # what a runoff of 1.0 means, in mm/yr
+    # Two different jobs, easily confused. `biome_blur` smooths the climate
+    # fields *before* they are banded, so it moves where a boundary falls and
+    # changes `world.biome`. `biome_soften` blurs the colours *after*, so it
+    # only changes how a boundary is drawn and nothing reads it but the render.
+    biome_blur: float = 2.0         # px
+    biome_soften: float = 2.5       # px
+    biome_tint: float = 0.35        # biome colour mixed into the relief layer
 
     # --- lakes and rivers ---
     lake_min_depth: float = 4e-3    # shallower closed basins are just wet ground
@@ -170,7 +203,9 @@ _PX_FIELDS = (
     "crust_blur", "crust_warp", "collision_w", "trench_w", "arc_offset",
     "arc_w", "cordillera_w", "rift_w", "ridge_w", "transform_w", "age_scale",
     "age_warp", "hotspot_sigma", "hotspot_spacing", "texture_warp",
-    "coast_plain_zone", "rain_blur", "margin_zone", "margin_reach", "margin_cut_offset",
+    "coast_plain_zone", "rain_blur", "temp_cont_reach", "biome_blur",
+    "biome_soften",
+    "margin_zone", "margin_reach", "margin_cut_offset",
     "margin_cut_w", "margin_slope_blur", "meander_period", "meander_taper",
     "meander_amp", "river_width", "river_width_max",
 )
@@ -216,6 +251,9 @@ class World:
     height: np.ndarray          # final
     water: rivers.Water
     runoff: np.ndarray          # water a cell contributes, 1 on average on land
+    temp: np.ndarray            # mean annual temperature, C
+    swing: np.ndarray           # seasonal half-range, C; warmest month is temp+swing
+    biome: np.ndarray           # climate.BIOME_NAMES index per cell
     timings: dict = field(default_factory=dict)
 
     @property
@@ -248,6 +286,8 @@ class World:
             "elev": float(self.height[y, x]),
             "flow": float(w.flow[y, x]),
             "rain": float(self.runoff[y, x]),
+            "temp": float(self.temp[y, x]),
+            "biome": climate.BIOME_NAMES[int(self.biome[y, x])],
             "dist_to_boundary": float(self.tect.dist[y, x]),
             "river_w": float(w.width[y, x]),
             "lake_depth": float(w.lake_depth[y, x]),
@@ -310,9 +350,20 @@ def generate(cfg=None, verbose=True, on_stage=None, **overrides):
         eroded.copy(), cfg, rng, routed=(er_filled, er_rec, er_flow),
         runoff=runoff, evap=evap))
 
+    def biomes():
+        # Last, for two reasons. It draws from `rng`, and running it before the
+        # river stage would move the meander noise off every seed it has ever
+        # made. And it wants the finished surface: rivers incise, a coastal cell
+        # can cross sea level doing it, and the biome grid's idea of the
+        # coastline has to be `world.land`'s.
+        t, sw = climate.temperature(h, cfg, rng)
+        return t, sw, climate.biomes(h, t, sw, runoff, cfg)
+
+    temp, swing, biome = stage("biomes", biomes)
+
     world = World(cfg=cfg, tect=tect, height_raw=raw, height_pre=pre,
                   height_eroded=eroded, height=h, water=water, runoff=runoff,
-                  timings=timings)
+                  temp=temp, swing=swing, biome=biome, timings=timings)
     if verbose:
         print(f"  {'total':<12} {sum(timings.values()):6.2f}s  "
               f"land={world.land.mean():.0%}  max={h.max():.2f}  min={h.min():.2f}  "

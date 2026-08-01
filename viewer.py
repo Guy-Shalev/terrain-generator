@@ -29,7 +29,7 @@ LAKE_SCALE = _C.lake_min_depth * 6        # lake_min_depth  = LAKE_SCALE / v
 
 HELP = [
     "left drag / arrows / WASD   pan",
-    "sliders (top right)         world, coast, rivers, lakes",
+    "sliders (top right)         world, coast, rivers, lakes, climate",
     "wheel / + -                 zoom      (Z resets)",
     "1..9, 0, -                  layer     ([ ] cycles all)",
     "R                           regenerate, new seed",
@@ -118,6 +118,8 @@ class Viewer:
                    fmt=lambda v: f"{v / 100:.2f}"),
             Slider("rivers", 1, 30, round(RIVER_SCALE / cfg.river_threshold)),
             Slider("lakes", 1, 30, round(LAKE_SCALE / cfg.lake_min_depth)),
+            Slider("temperature", -20, 20, round(cfg.temp_offset),
+                   fmt=lambda v: f"{v:+d}C"),
         ]
         self.regenerate(cfg.seed)
 
@@ -232,7 +234,8 @@ class Viewer:
         derived from an integer by fixed arithmetic, so the equality test in
         `apply_sliders` is exact.
         """
-        plates, size, land, rough, rivers, lakes = (s.value for s in self.sliders)
+        plates, size, land, rough, rivers, lakes, temp = (
+            s.value for s in self.sliders)
         return {
             "n_plates": plates,
             "width": size, "height": _map_height(size),
@@ -240,6 +243,7 @@ class Viewer:
             "margin_h": rough / 100,
             "river_threshold": RIVER_SCALE / rivers,
             "lake_min_depth": LAKE_SCALE / lakes,
+            "temp_offset": float(temp),
         }
 
     def apply_sliders(self):
@@ -280,9 +284,11 @@ class Viewer:
                     extra = f"  lake {d['lake_depth']:.3f} deep"
                 elif d["river_w"] > 0:
                     extra = f"  river {d['river_w']:.1f} wide"
+                if d["elev"] > 0:
+                    extra += f"  {d['biome']}"
                 self.text(f"h {d['elev']:+.3f}  plate {d['plate']:>2} {d['crust'][:4]}"
                           f"  bnd {d['dist_to_boundary']:.0f}px  rain {d['rain']:.2f}"
-                          f"  flow {d['flow']:.0f}{extra}",
+                          f"  {d['temp']:+.0f}C  flow {d['flow']:.0f}{extra}",
                           x, 6, (170, 210, 255))
         self.draw_sliders()
         if self.busy:

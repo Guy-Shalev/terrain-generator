@@ -36,6 +36,7 @@ python test_terrain.py       # invariant checks
 | erosion | `terrain/hydrology.py` | thermal creep, depression filling, D8 routing, flow accumulation, stream-power incision, repeated |
 | climate | `terrain/climate.py` | zonal rain belts, moisture marched downwind for orographic shadows, runoff and evaporation fields |
 | lakes and rivers | `terrain/rivers.py` | lake water balance, outlet carving, polyline extraction, meandering, discharge-based width, channel incision |
+| biomes | `terrain/climate.py` | temperature from latitude, lapse rate and continentality; biomes from temperature against rain relative to evapotranspiration |
 
 Boundary type is never assigned by hand. The velocity field is constant inside
 each plate, so its derivatives are non-zero only where plates meet: negative
@@ -55,12 +56,13 @@ Left-drag or WASD/arrows to pan, wheel to zoom, `Z` to fit. Number keys pick a
 layer, `[` `]` cycle. `R` regenerates with a new seed, `T` with the same one,
 `G` overlays plate motion arrows, `P` saves the current layer, `F1` toggles help.
 The status bar reads out elevation, plate, crust type, distance to the nearest
-plate boundary, and drainage area under the cursor.
+plate boundary, drainage area, temperature and biome under the cursor.
 
-Six sliders top right, in two groups. The world: plate count (4-48), size
+Seven sliders top right, in three groups. The world: plate count (4-48), size
 (192-1024 wide, 4:3), `land_fraction` as a whole percent (shown as land/sea),
 and `margin_h` (0.00-0.40), the fray on continent-ocean margins. Then the
-water: river count and lake count.
+water: river count and lake count. Then the climate: `temp_offset`, in whole
+degrees from -20 to +20, which shifts the equator and the poles together.
 
 Both counts are cutoffs in the config and run backwards - a river needs
 `river_threshold` of drainage area, a lake `lake_min_depth` of depth, so
@@ -69,7 +71,8 @@ upwards the way a reader expects, with 6 reproducing the config defaults.
 Measured at 320x240: rivers 28 / 83 / 462 at slider 2 / 6 / 30 and lakes
 0 / 10 / 16 at 1 / 6 / 30, each moving its own target and leaving the other
 alone. Channel width (`river_width`, and `river_width_max` which caps it),
-meander amplitude (`meander_amp`) and the whole climate group stay config-only.
+meander amplitude (`meander_amp`) and the rest of the climate group stay
+config-only.
 
 Sea level is a quantile of the elevation field, so the whole land range works
 and the result lands within a point or so of the setting; 0 and 100 are
@@ -285,6 +288,109 @@ shadow. Over six seeds at 384x288, of 54 basins:
 | dry ground (runoff < 0.6) | 34 | 0.44 | 88% |
 | wet ground (runoff >= 0.6) | 20 | 0.82 | 55% |
 
+## Temperature and biomes
+
+Rain on its own cannot say what grows anywhere. A dry cell at 60 degrees and a
+dry cell at 25 get the same tan on the rainfall layer, and one is steppe while
+the other is the Sahara. Temperature is the missing axis.
+
+Three terms set it. Latitude gives the baseline, falling from `temp_equator` to
+`temp_pole` as the square of it, on a latitude wobbled the same way the rain
+belts are. Height takes `temp_lapse` off that, on land only. And distance from
+the sea sets `swing`, the seasonal half-range: water holds its heat, so a coast
+barely moves between seasons while an interior at the same latitude bakes and
+then freezes. The continentality term saturates rather than growing linearly -
+an ocean's moderating reach is spent within `temp_cont_reach` of it, and past
+that one more cell inland changes nothing.
+
+`swing` is why `temperature` returns a pair. Mean annual temperature cannot
+tell taiga from tundra: a continental interior averages below freezing and
+still grows forest, because its *summer* clears the tree line even though its
+winter is far worse than any coast's. What decides is the warmest month.
+
+`temp_lapse` is 38 C per unit of height, about half a true 6.5 C/km read
+against this terrain's scale. That is deliberate. The generator carries far
+more high ground than Earth does - the top tenth of its land sits above what
+would be 2500 m - and at a true lapse rate that tenth freezes and the map comes
+out a third taiga.
+
+Biomes come from temperature against **rain relative to heat**, not rain. The
+moisture axis is `precip_mean_mm * runoff` divided by potential
+evapotranspiration, which Holdridge reads linearly off biotemperature - the
+year averaged with every month below freezing counted as zero, sampled twelve
+times around `swing`. That single division is the whole difference from a plain
+Whittaker lookup, and it is what separates a cold desert from tundra: both are
+dry in millimetres, but only one is dry relative to its own thirst. Get it
+wrong in the obvious way - clipping the annual mean instead of the seasonal
+cycle - and every freezing cell's evapotranspiration goes to zero, its moisture
+index to infinity, and a quarter of the map to taiga.
+
+Then five moisture bands against six temperature bands, with the two cases no
+matrix handles checked first, because both key on the warmest month rather than
+the mean: permanent ice below 0, and the tree line below 6.
+
+|  | polar | subpolar | cool | temperate | subtropical | tropical |
+|---|---|---|---|---|---|---|
+| **arid** | cold desert | cold desert | cold desert | cold desert | hot desert | hot desert |
+| **semiarid** | tundra | tundra | steppe | steppe | shrubland | savanna |
+| **subhumid** | tundra | taiga | taiga | temp. forest | trop. seasonal | trop. seasonal |
+| **humid** | tundra | taiga | temp. forest | temp. forest | temp. forest | trop. rainforest |
+| **perhumid** | tundra | taiga | temp. rainforest | temp. rainforest | trop. rainforest | trop. rainforest |
+
+Both sets of cuts are shifted off the textbook values, and for the same reason:
+this generator's climate is narrower than Earth's. Its wettest land gets 2.4x
+the mean where a real rainforest gets 3 to 5x, and its equator is only 5 C
+above the tropical cut before the lapse rate takes the rest. Left on
+Holdridge's own numbers the map bunched into two middle bands - deserts at 5%
+of land against Earth's 20%, tropical rainforest at 1.5% against 6%, and a
+third of everything temperate forest. The bands are the same provinces read off
+a flatter distribution. Over five seeds at 384x288:
+
+| biome | here | Earth |
+|---|---|---|
+| hot desert | 15% | 14% |
+| taiga | 15% | 13% |
+| steppe | 14% | 10% |
+| temperate forest | 11% | 10% |
+| cold desert | 10% | 6% |
+| shrubland | 8% | 3% |
+| tundra | 7% | 8% |
+| tropical seasonal forest | 6% | 6% |
+| savanna | 6% | 10% |
+| temperate rainforest | 5% | 2% |
+| tropical rainforest | 3% | 6% |
+| ice | 1% | 5% |
+
+Ice is low because the polar crust taper (`polar_start`, `polar_ocean`)
+deliberately leaves little land at the poles - that is terrain, not climate.
+
+Two blurs, doing different jobs. `biome_blur` smooths the climate fields
+*before* they are banded: straight off the raw ones every hill that crosses a
+cut drops a lone cell of another biome into the middle of a region and the map
+reads as speckle. It only removes features narrower than itself, and a range
+wide enough to have its own climate is much wider than that, so altitudinal
+zonation survives it. It moves where a boundary falls, and so it changes
+`world.biome`.
+
+`biome_soften` blurs the *colours*, after. Classification is a hard cut - a
+cell is one biome or another and `world.biome` says which - but nothing on the
+ground changes over a single cell, and drawn literally every band boundary is a
+stencil edge. The blur is masked to land and divided by the blurred mask, so a
+transition inland is a gradient while the coast stays exactly as sharp as the
+sea ramp draws it. Nothing but the renderer reads it.
+
+Two layers draw it - `temperature`, absolute so that freezing sits at a fixed
+place on the ramp, and `biomes` - and the main relief layer mixes the biome
+colour into its hypsometric tint at `biome_tint`, so height and vegetation read
+off the same map. The `temperature` slider shifts `temp_offset`: at -20 the
+world is half tundra and 40% ice, at +20 it is 60% desert.
+
+Climate stays one-directional. It reads the finished surface and the rain, and
+feeds nothing back: rivers, lakes, the water balance and erosion are all
+exactly what they were. The stage runs last for a second reason too - it draws
+from `rng`, and running it earlier would move the river meanders on every seed
+the generator has ever made.
+
 ## Lakes and rivers
 
 A lake holds the water surface its own catchment can keep, not the one its rim
@@ -407,9 +513,16 @@ relief layer hillshades so lakes come out flat.
 
 ## Not done yet
 
-No biomes, no temperature, nothing human-made. Rain is modelled but only feeds
-the water: erosion still runs on unweighted flow, so a soaked windward slope
-carves no faster than the desert behind it. Nothing goes fully dry either - a
+Nothing human-made. Climate is annual-mean plus a seasonal half-range, which is
+enough for Whittaker but not for Koppen-Geiger - that keys on *when* the rain
+falls, and the moisture march has no seasons to put it in. No ocean currents
+either, so there is no warm west coast and no Atacama: the only thing that
+makes one coast differ from another at the same latitude is which way its wind
+blows. Mediterranean shrubland is placed as subtropical semiarid, which is the
+right corner of the diagram but not the real test, since the real test is a dry
+summer. Climate feeds nothing back: erosion still runs on unweighted flow, so a
+soaked windward slope carves no faster than the desert behind it, and the biome
+map has no say in where a river goes. Nothing goes fully dry either - a
 basin catches at least its own footprint, so playas need evaporation to beat the
 rain locally rather than a lake-surface rate that is merely high. Lake outflow is
 carved rather than simulated: the level responds to a water balance now, the

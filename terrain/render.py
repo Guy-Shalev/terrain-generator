@@ -63,9 +63,15 @@ def hillshade(h, azimuth=315.0, altitude=45.0, z=28.0):
     return np.clip(shade, 0, 1)
 
 
-def relief(h, shade=True, surface=None):
-    """Hypsometric tint of the bed, hillshaded off `surface` if water sits on it."""
+def relief(h, shade=True, surface=None, tint=None, tint_mix=0.0):
+    """Hypsometric tint of the bed, hillshaded off `surface` if water sits on it.
+
+    `tint` is an optional per-cell colour - a biome map - blended into the land
+    at `tint_mix` before shading. The sea is left alone.
+    """
     rgb = hypsometric(h)
+    if tint is not None and tint_mix > 0:
+        rgb = np.where((h > 0)[..., None], rgb * (1 - tint_mix) + tint * tint_mix, rgb)
     if shade:
         s = hillshade(h if surface is None else surface)[..., None]
         # Flatter shading under water: at full land contrast the abyssal noise
@@ -85,14 +91,9 @@ LAKE_DEPTH_BLUR = 2.0   # softens the drowned channel out of the depth shading
 RIVER_RAMP = [(0.0, (110, 165, 195)), (0.4, (78, 132, 176)), (1.0, (48, 96, 150))]
 
 
-def water_map(w, shade=True):
-    """The main map: relief with lakes at their own flat level and rivers by width.
-
-    Lakes are shaded from the water surface, not the bed, so they read as flat
-    sheets; the depth ramp underneath still shows how deep the basin is.
-    """
+def overpaint_water(rgb, w):
+    """Lay lakes and rivers over whatever the land was painted with."""
     wat = w.water
-    rgb = relief(w.height, shade, surface=w.surface)
     if wat.lake_mask.any():
         # Shaded off a blurred depth: the ramp is meant to say how deep the
         # basin is, not to trace the metre-wide channel at the bottom of it.
@@ -104,7 +105,23 @@ def water_map(w, shade=True):
     if wat.river_mask.any():
         v = np.clip(wat.width / max(1e-6, w.cfg.river_width_max), 0, 1)
         rgb = np.where(wat.river_mask[..., None], _ramp(v, RIVER_RAMP), rgb)
-    return np.clip(rgb, 0, 255).astype(np.uint8)
+    return rgb
+
+
+def water_map(w, shade=True):
+    """The main map: relief with lakes at their own flat level and rivers by width.
+
+    Lakes are shaded from the water surface, not the bed, so they read as flat
+    sheets; the depth ramp underneath still shows how deep the basin is.
+
+    The land is tinted towards its biome colour at `cfg.biome_tint`, so the
+    hypsometric ramp still says how high somewhere is while its hue says what
+    grows there. Mixed in before shading, and only over land: the sea has its
+    own narrow ramp and there is no biome under it to say anything.
+    """
+    rgb = relief(w.height, shade, surface=w.surface, tint=biome_rgb(w),
+                 tint_mix=w.cfg.biome_tint)
+    return np.clip(overpaint_water(rgb, w), 0, 255).astype(np.uint8)
 
 
 def plate_colors(n, rng=None):
@@ -181,6 +198,75 @@ def rain_map(w):
                    0, 255).astype(np.uint8)
 
 
+# Indexed by `climate` biome id. Kept muted and in the same family as
+# `LAND_RAMP`, because these get mixed into the relief layer rather than
+# replacing it: a saturated palette here turns the main map into a political
+# map. Ocean is never drawn from this - the sea ramp handles it.
+BIOME_COLORS = np.array([
+    (37, 86, 134),      # ocean, only ever a placeholder
+    (240, 246, 252),    # ice
+    (154, 158, 146),    # tundra
+    (58, 94, 78),       # taiga
+    (168, 164, 148),    # cold desert          grey, against the hot desert's tan
+    (176, 182, 108),    # steppe
+    (92, 134, 74),      # temperate forest
+    (48, 102, 70),      # temperate rainforest
+    (150, 138, 86),     # shrubland            olive-brown, against steppe's green
+    (224, 190, 128),    # hot desert
+    (202, 176, 92),     # savanna
+    (122, 152, 64),     # tropical seasonal forest
+    (34, 96, 48),       # tropical rainforest
+], dtype=float)
+
+
+def biome_rgb(w, soften=None):
+    """Per-cell biome colour, sea left as the hypsometric ramp will paint it.
+
+    Classification is a hard cut - a cell is one biome or another, and
+    `world.biome` says which - but nothing on the ground changes over one cell,
+    and drawn literally every band boundary is a stencil edge. So the colours
+    are softened here rather than the ids anywhere: blurred, and blurred
+    *masked*, so the coast stays as sharp as the sea ramp draws it instead of
+    bleeding green into the water. Dividing by the blurred mask is what keeps a
+    headland the full strength of its own colour rather than a fraction of it
+    mixed with the ocean's nothing.
+    """
+    rgb = BIOME_COLORS[w.biome]
+    s = w.cfg.biome_soften if soften is None else soften
+    if s <= 0:
+        return rgb
+    m = w.land.astype(float)
+    num = np.stack([grid.blur(rgb[..., c] * m, s) for c in range(3)], axis=-1)
+    return num / np.maximum(grid.blur(m, s), 1e-6)[..., None]
+
+
+def biome_map(w):
+    """Flat biome colour, hillshaded, with the water drawn back over it."""
+    rgb = biome_rgb(w)
+    # Shallower than the relief layer's shading. The point here is the biome
+    # boundaries, and at full contrast a mountain's own shadow reads as one.
+    rgb = np.where(w.land[..., None], rgb * (0.78 + 0.38 * hillshade(w.height)[..., None]),
+                   hypsometric(w.height))
+    return np.clip(overpaint_water(rgb, w), 0, 255).astype(np.uint8)
+
+
+TEMP_RAMP = [(-30.0, (78, 96, 168)), (-10.0, (120, 168, 208)),
+             (0.0, (226, 234, 240)), (12.0, (232, 206, 132)),
+             (24.0, (216, 130, 66)), (34.0, (166, 48, 44))]
+
+
+def temp_map(w):
+    """Mean annual temperature, absolute, over a dim relief.
+
+    Absolute and not ranked, unlike the rainfall layer: degrees mean something
+    on their own, and the freezing point sitting at a fixed place on the ramp
+    is most of what the layer is for.
+    """
+    base = relief(w.height, shade=True) * 0.45
+    return np.clip(_ramp(w.temp, TEMP_RAMP) * 0.75 + base * 0.5,
+                   0, 255).astype(np.uint8)
+
+
 def land_mask(h, lakes=None):
     rgb = np.where((h > 0)[..., None], np.array([232, 226, 208.0]),
                    np.array([28, 52, 84.0]))
@@ -213,6 +299,10 @@ LAYERS = [
     ("boundaries", lambda w: plates(w.tect, cls=_cls(w), shade_height=w.height)),
     ("stress", lambda w: stress(w.tect)),
     ("rainfall", rain_map),
+    # Slotted in here rather than appended: the viewer binds number keys to the
+    # first eleven layers only, and these two are worth reaching for.
+    ("temperature", temp_map),
+    ("biomes", biome_map),
     ("drainage", lambda w: flow(w.flow, w.height, w.cfg.river_threshold * w.height.size)),
     ("erosion delta", lambda w: erosion_diff(w.height_pre, w.height_eroded)),
     ("slope", lambda w: slope_map(w.height)),
