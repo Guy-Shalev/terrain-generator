@@ -130,15 +130,45 @@ def temperature(h, cfg, rng, sea_level=0.0):
     lat = np.clip(lat + cfg.temp_wobble * noise.fbm(
         h.shape[0], h.shape[1], rng, cfg.temp_wobble_periods, 3), -1.0, 1.0)
     base = cfg.temp_equator + (cfg.temp_pole - cfg.temp_equator) * lat ** 2
-    temp = base + cfg.temp_offset - cfg.temp_lapse * np.maximum(h - sea_level, 0.0)
+    # The offset lands hardest on the poles. A warmer world is a *flatter* one -
+    # the Eocene ran an equator-to-pole gradient near 30 C against today's 45 -
+    # so shifting every latitude by the same amount is the one thing warming
+    # demonstrably does not do.
+    #
+    # Normalised over land, not over latitude. The weight averages to one across
+    # a uniform globe, the mean of lat^2 being a third, but this world's land is
+    # not uniform: the polar taper keeps it in the middle latitudes, where the
+    # weight is below one, and a slider set to +10 delivered +6.9 C to the
+    # ground. Dividing by the land mean makes the slider mean what it says on
+    # land and leaves the pole-to-equator ratio, which is the point of it, alone.
+    weight = (1.0 - cfg.temp_polar_amp) + 3.0 * cfg.temp_polar_amp * lat ** 2
+    land = h > sea_level
+    if land.any():
+        weight = weight / max(1e-6, float(weight[land].mean()))
+    temp = (base + cfg.temp_offset * weight
+            - cfg.temp_lapse * np.maximum(h - sea_level, 0.0))
     # Saturating rather than linear: the moderating reach of an ocean is spent
     # within a few hundred km of it, and past that one more cell inland changes
     # nothing. Linear in the distance instead, the middle of a big continent
     # runs away to a swing no latitude justifies.
-    cont = 1.0 - np.exp(-grid.edt(h > sea_level) / max(1e-6, cfg.temp_cont_reach))
-    swing = (cfg.temp_swing * np.abs(lat)
-             * (cfg.temp_maritime + (1.0 - cfg.temp_maritime) * cont))
+    swing = _swing(lat, land, cfg)
+    # Sea ice moderates nothing: a frozen ocean has a lid on it and behaves like
+    # land, which is why the Siberian coast is continental and Norway's is not.
+    # So the distance that sets continentality is measured to *open* water. One
+    # pass is enough - the first swing decides where the sea freezes, the second
+    # uses it - and the fixed point is not worth chasing: the cells that would
+    # flip on a third pass are the ones sitting exactly on the ice edge.
+    frozen = ~land & (temp + swing < ICE_C)
+    if frozen.any() and not (land | frozen).all():
+        swing = _swing(lat, land | frozen, cfg)
     return temp, swing
+
+
+def _swing(lat, closed, cfg):
+    """Seasonal half-range: latitude, damped by how near open water is."""
+    cont = 1.0 - np.exp(-grid.edt(closed) / max(1e-6, cfg.temp_cont_reach))
+    return (cfg.temp_swing * np.abs(lat)
+            * (cfg.temp_maritime + (1.0 - cfg.temp_maritime) * cont))
 
 
 # Biome ids. Ocean is 0, so an empty grid reads as all sea.
@@ -190,6 +220,25 @@ BIOME_MATRIX = np.array([
 ], dtype=np.int8)
 
 
+def precip_mm(cfg):
+    """What a runoff of 1.0 means in mm/yr, at this world's temperature.
+
+    A warmer atmosphere holds more water - about 7% more per degree - but global
+    rainfall is limited by the energy available to evaporate it, not by what the
+    air could carry, so it rises nearer 2 to 3% per degree. `rain_per_degree` is
+    that number, and without it the temperature slider only ever raises
+    evapotranspiration: rain in millimetres could not move, so the warm end of
+    the slider turned the map into a desert rather than the wetter world a real
+    hothouse is. Measured over two seeds at 384x288, desert ran 27% of land at
+    the middle of the slider and 52% at the top.
+
+    Potential evapotranspiration still climbs faster than this does, so a hot
+    world is drier *relative to its own thirst* - which is right, and is why the
+    subtropics are where they are - it just no longer runs away.
+    """
+    return max(1.0, cfg.precip_mean_mm * (1.0 + cfg.rain_per_degree * cfg.temp_offset))
+
+
 def biomes(h, temp, swing, runoff, cfg, sea_level=0.0):
     """What grows where: temperature against rain *for that temperature*.
 
@@ -222,7 +271,7 @@ def biomes(h, temp, swing, runoff, cfg, sea_level=0.0):
     # by the overrides at the bottom of this function anyway, and the only job
     # left for the floor is to keep the division finite.
     pet = np.maximum(58.93 * biotemp, 58.93 * 1.5)      # mm/yr
-    mi = cfg.precip_mean_mm * runoff / pet
+    mi = precip_mm(cfg) * runoff / pet
     # Banded straight off the raw fields, every hill that crosses a cut puts a
     # lone cell of another biome in the middle of one, and the map comes out
     # speckled rather than regional. A short blur first costs nothing and only

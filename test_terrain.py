@@ -346,6 +346,59 @@ def test_lakes_and_rivers():
     assert (w.height <= w.height_eroded + 1e-9).all()
 
 
+def test_temperature_slider_moves_a_whole_climate():
+    """Warming must move rain, the gradient and the ice with it.
+
+    The slider used to raise potential evapotranspiration and nothing else:
+    rainfall in millimetres could not move, because `runoff` is normalised to
+    average one over land and cannot know the world got hotter. Desert ran 3% of
+    land at the cold end and 52% at the warm one, which is neither Earth nor
+    interesting. Three couplings fix it - rain follows temperature, the offset
+    lands hardest on the poles, and a frozen sea stops moderating its coast.
+    """
+    kw = dict(width=256, height=192, seed=7, erosion_passes=2)
+    cold = generate(Config(temp_offset=-10.0, **kw), verbose=False)
+    warm = generate(Config(temp_offset=+10.0, **kw), verbose=False)
+
+    def share(w, *biomes):
+        land = w.height > 0
+        return float(np.isin(w.biome[land], biomes).mean())
+
+    def gradient(w):
+        h = w.temp.shape[0]
+        return (w.temp[h // 2 - 8:h // 2 + 8].mean() -
+                np.concatenate([w.temp[:16], w.temp[-16:]]).mean())
+
+    for w in (cold, warm):
+        d = share(w, climate.HOT_DESERT, climate.COLD_DESERT)
+        assert 0.12 < d < 0.45, f"desert is {d:.0%} of land at {w.cfg.temp_offset:+.0f}"
+    # A warm world is a flatter one, and the slider means what it says on land.
+    assert gradient(warm) < gradient(cold) - 15, \
+        f"gradient did not narrow: {gradient(cold):.0f} -> {gradient(warm):.0f}"
+    shift = warm.temp[warm.height > 0].mean() - cold.temp[cold.height > 0].mean()
+    assert abs(shift - 20.0) < 3.0, f"20 degrees of slider moved land by {shift:.1f}"
+    assert share(warm, climate.ICE) < share(cold, climate.ICE)
+    assert share(warm, climate.TROPICAL_RAINFOREST) > \
+        share(cold, climate.TROPICAL_RAINFOREST)
+
+
+def test_frozen_sea_stops_moderating_its_coast():
+    """Sea ice has a lid on it and behaves like land, so the coast behind it
+    swings like an interior. Measured on the field, not on the biomes: the
+    continentality term is what carries it."""
+    kw = dict(width=256, height=192, seed=7, erosion_passes=2)
+    cold = generate(Config(temp_offset=-12.0, **kw), verbose=False)
+    mild = generate(Config(temp_offset=0.0, **kw), verbose=False)
+    lat = np.abs(grid.latitude(cold.height.shape))
+    for w, name in ((cold, "cold"), (mild, "mild")):
+        w.frozen = (w.height <= 0) & (w.temp + w.swing < 0.0)
+    assert cold.frozen.mean() > 3 * mild.frozen.mean(), "the cold world froze no sea"
+    polar = (cold.height > 0) & (lat > 0.55)
+    assert polar.any()
+    assert cold.swing[polar].mean() > mild.swing[polar].mean() + 1.5, \
+        "polar coasts did not turn continental"
+
+
 def test_rivers_reach_water():
     """Every drawn river must be part of a body that reaches a lake or the sea.
 

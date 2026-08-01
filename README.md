@@ -62,7 +62,8 @@ Seven sliders top right, in three groups. The world: plate count (4-48), size
 (192-1024 wide, 4:3), `land_fraction` as a whole percent (shown as land/sea),
 and `margin_h` (0.00-0.40), the fray on continent-ocean margins. Then the
 water: river count and lake count. Then the climate: `temp_offset`, in whole
-degrees from -20 to +20, which shifts the equator and the poles together.
+degrees from -20 to +20, which warms the poles harder than the equator and takes
+the rain and the sea ice with it.
 
 Both counts are cutoffs in the config and run backwards - a river needs
 `river_threshold` of drainage area, a lake `lake_min_depth` of depth, so
@@ -382,8 +383,55 @@ sea ramp draws it. Nothing but the renderer reads it.
 Two layers draw it - `temperature`, absolute so that freezing sits at a fixed
 place on the ramp, and `biomes` - and the main relief layer mixes the biome
 colour into its hypsometric tint at `biome_tint`, so height and vegetation read
-off the same map. The `temperature` slider shifts `temp_offset`: at -20 the
-world is half tundra and 40% ice, at +20 it is 60% desert.
+off the same map.
+
+## What the temperature slider moves
+
+`temp_offset` is a shift, not a setting: it slides the whole latitude curve and
+never touches its ends. On its own that is the one thing warming does not do,
+and it showed. Potential evapotranspiration climbed with the slider while
+rainfall in millimetres could not move - `runoff` is normalised to average one
+over land and cannot know the world got hotter - so the warm end turned the map
+into sand: desert ran 3% of land at -10 and **52% at +10**. Three couplings, all
+of them exactly nothing at slider 0, so the calibrated middle is untouched:
+
+- **Rain follows temperature.** `precip_mean_mm` scales by `rain_per_degree` per
+  degree of offset. Clausius-Clapeyron gives 7% per degree of what the air can
+  *hold*; global rainfall is limited by the energy available to evaporate it and
+  responds nearer 2-3%. The default 0.05 sits between them because it carries
+  both jobs - it also stands in for how much moisture reaches an interior, which
+  follows capacity more than the global mean. At 0.025 desert runs 11/27/40% at
+  -10/0/+10; at 0.07, 44/27/23%; at 0.05, 25/27/30%.
+- **The offset lands hardest on the poles.** A warmer world is a *flatter* one:
+  the Eocene ran an equator-to-pole gradient near 30 C against today's 45.
+  `temp_polar_amp` weights the shift by latitude, normalised over **land** - the
+  weight averages to one across a uniform globe, but the polar taper keeps this
+  world's land in the middle latitudes where the weight is below one, and a
+  slider set to +10 delivered +6.9 C to the ground.
+- **A frozen sea stops moderating its coast.** Continentality is distance to
+  *open* water, not to any water: sea ice has a lid on it and behaves like land,
+  which is why Siberia's coast is continental and Norway's is not. Computed in
+  one extra pass - the first swing decides where the sea freezes, the second
+  uses it - and the fixed point is not worth chasing, since the cells that would
+  flip on a third pass are the ones sitting on the ice edge.
+
+Measured over two seeds at 384x288:
+
+| `temp_offset` | -10 | -5 | 0 | +5 | +10 |
+|---|---|---|---|---|---|
+| desert | 25.4% | 25.6% | 27.2% | 29.0% | 29.8% |
+| ice | 16.1% | 6.6% | 1.5% | 0.2% | 0.0% |
+| rainforest | 1.0% | 2.3% | 6.4% | 12.5% | 15.4% |
+| equator-to-pole, C | 62.1 | 52.4 | 42.6 | 32.9 | 23.2 |
+| land mean, C | 3.2 | 8.2 | 13.2 | 18.2 | 23.2 |
+| sea frozen | 47.8% | 31.8% | 9.9% | 0.0% | 0.0% |
+
+Desert now stays inside Earth's own 25-30% at every setting where it used to run
+from 3 to 52, the gradient narrows as the world warms, and the land mean tracks
+the slider one for one. What moves instead is what should: ice, rainforest, and
+how continental the high-latitude coasts are - polar land swings 7.5 C either
+side of its mean at slider 0 and 10.4 C at -10, because half the sea around it
+has frozen over.
 
 Climate stays one-directional. It reads the finished surface and the rain, and
 feeds nothing back: rivers, lakes, the water balance and erosion are all

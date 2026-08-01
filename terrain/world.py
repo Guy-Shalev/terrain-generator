@@ -128,13 +128,15 @@ class Config:
     rain_evap_cap: float = 0.2      # driest runoff `lake_evap` is divided by
     temp_equator: float = 27.0      # mean annual C at the equator, at sea level
     temp_pole: float = -25.0        # ditto at the poles
-    # Global shift; the viewer's temperature slider. ponytail: warming here
-    # raises evapotranspiration but not rainfall, because `runoff` is normalised
-    # to average one over land and cannot know the world got hotter - so a
-    # hothouse comes out as desert rather than as the wetter place a real one
-    # would be. Fix by scaling `precip_mean_mm` with `temp_offset` if the warm
-    # end of the slider ever needs to be more than a desert world.
+    # Global shift; the viewer's temperature slider. Rain follows it through
+    # `rain_per_degree` and it lands hardest on the poles through
+    # `temp_polar_amp`, so warming flattens the world rather than merely raising
+    # evapotranspiration everywhere.
     temp_offset: float = 0.0
+    # How much of the shift the poles get over the equator. 0 is a uniform
+    # offset; at 0.5 the poles move twice the slider and the equator half of it,
+    # which is about the amplification a hothouse actually ran.
+    temp_polar_amp: float = 0.5
     # C lost per unit of height. Land here runs to about 0.5, and reading that
     # as a 6 km range puts one height unit at 12 km, so Earth's 6.5 C/km lands
     # near 78. It is set at half that on purpose: this terrain carries far more
@@ -152,6 +154,16 @@ class Config:
     # continental and the seasonal swing never arrives.
     temp_cont_reach: float = 15.0
     precip_mean_mm: float = 750.0   # what a runoff of 1.0 means, in mm/yr
+    # Fractional change in that per degree of `temp_offset`. Clausius-Clapeyron
+    # gives 7% per degree of what the air can *hold*, while global rainfall is
+    # limited by the energy available to evaporate it and responds nearer 2 to
+    # 3%. This number has to carry both, because it also stands in for how much
+    # moisture reaches a continental interior, which follows the capacity more
+    # than the global mean. Measured over two seeds at 384x288, desert as a
+    # share of land at slider -10 / 0 / +10 runs 11 / 27 / 40% at 0.025 and
+    # 44 / 27 / 23% at 0.07; at 0.05 it is 25 / 27 / 30%, which keeps both ends
+    # of the slider inside Earth's own range instead of turning one into sand.
+    rain_per_degree: float = 0.05
     # Two different jobs, easily confused. `biome_blur` smooths the climate
     # fields *before* they are banded, so it moves where a boundary falls and
     # changes `world.biome`. `biome_soften` blurs the colours *after*, so it
