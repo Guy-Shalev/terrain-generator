@@ -227,6 +227,7 @@ class Config:
     river_threshold: float = 0.0006     # drainage area needed to become a river
     river_width: float = 0.85           # channel width in cells at that threshold
     river_width_max: float = 4.0
+    river_width_cap: float = 6.0        # widest channel in cells, at any map size
     river_width_exp: float = 0.45       # width goes as discharge to this power
     # Discharge at which a channel is `river_width` wide, as a fraction of the
     # map. Deliberately *not* `river_threshold`: that one is the "how many
@@ -324,6 +325,15 @@ def _scale_to_size(cfg):
         setattr(cfg, k, getattr(cfg, k) / s)
     cfg.outlet_carve_len = max(1, round(cfg.outlet_carve_len * s))
     cfg.lake_min_area = max(1, round(cfg.lake_min_area * s * s))   # an area
+    # Channel width is a pixel quantity like the rest, so at HD and up a trunk
+    # river is drawn a dozen cells across and reads as an estuary. Cap the
+    # widest channel, and pull the whole width scale down by the same factor:
+    # capping `river_width_max` alone would leave the tributaries scaled up
+    # against a ceiling they all reach, and the network draws as a mat of
+    # equal channels rather than a trunk with branches hanging off it.
+    if cfg.river_width_max > cfg.river_width_cap:
+        cfg.river_width *= cfg.river_width_cap / cfg.river_width_max
+        cfg.river_width_max = cfg.river_width_cap
     return cfg
 
 

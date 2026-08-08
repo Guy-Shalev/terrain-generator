@@ -729,6 +729,23 @@ def test_config_scales_with_map_size():
     assert world._scale_to_size(Config(width=512)).plate_warp == 34.0
 
 
+def test_river_width_stops_scaling_at_the_cap():
+    """Past the cap the whole width scale holds still, not just the ceiling.
+
+    Clamping `river_width_max` alone would leave every tributary scaled up
+    against a ceiling they all reach, drawing the network as a mat.
+    """
+    small = world._scale_to_size(Config(width=640))       # 4 * 1.25 = 5, under
+    assert small.river_width_max == 5.0
+    assert small.river_width == 0.85 * 1.25
+    for wdt in (1280, 1920, 3840):
+        big = world._scale_to_size(Config(width=wdt))
+        assert big.river_width_max == big.river_width_cap
+        # Same factor on both, so trunk and tributary keep their contrast.
+        assert abs(big.river_width / big.river_width_max
+                   - Config().river_width / Config().river_width_max) < 1e-12
+
+
 def test_relief_does_not_sharpen_with_map_size():
     """A bigger map must be the same world in more detail, not a harder one.
 

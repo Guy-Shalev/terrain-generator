@@ -13,8 +13,18 @@ from terrain import Config, generate, export, render
 
 
 def _map_height(width):
-    """Maps keep a 4:3 aspect, so one slider is enough for world size."""
+    """4:3 height for a given width, even so the block pooling halves cleanly."""
     return int(width * 3 / 4) // 2 * 2
+
+
+# The size slider walks this ladder, so one slider is still enough for world
+# size. 4:3 up to 1024, then the 16:9 screen sizes. Ordered by cell count, so
+# dragging right is always "bigger and slower" - and it is much slower at the
+# top: cost grows faster than area (the erosion and fill loops need more passes
+# on a wider grid), so 2.6x the cells is 4.4x the wait - ~5s at 640x480, ~76s at
+# 1920x1080, and 4K extrapolates to ~10min and ~4 GB.
+SIZES = ([(w, _map_height(w)) for w in range(192, 1025, 64)]
+         + [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)])
 
 
 # "How many rivers" and "how many lakes" are cutoffs in the config: a river
@@ -25,6 +35,13 @@ def _map_height(width):
 _C = Config()
 RIVER_SCALE = _C.river_threshold * 6      # river_threshold = RIVER_SCALE / v
 LAKE_SCALE = _C.lake_min_depth * 6        # lake_min_depth  = LAKE_SCALE / v
+
+
+def _size_index(cfg):
+    """Slider rung for the running config. --size takes any WxH, on the ladder
+    or not, so the knob starts on whichever rung is closest by cell count."""
+    return min(range(len(SIZES)),
+               key=lambda i: abs(SIZES[i][0] * SIZES[i][1] - cfg.width * cfg.height))
 
 
 HELP = [
@@ -110,8 +127,8 @@ class Viewer:
         self.cam = [0.0, 0.0]  # top-left of the view, in map cells
         self.sliders = [
             Slider("plates", 4, 48, cfg.n_plates),
-            Slider("map size", 192, 1024, cfg.width, step=64,
-                   fmt=lambda v: f"{v}x{_map_height(v)}"),
+            Slider("map size", 0, len(SIZES) - 1, _size_index(cfg),
+                   fmt=lambda i: "{}x{}".format(*SIZES[i])),
             Slider("land/sea", 0, 100, round(cfg.land_fraction * 100),
                    fmt=lambda v: f"{v}/{100 - v}"),
             # Sliders are integer, so this one carries hundredths.
@@ -239,7 +256,7 @@ class Viewer:
             s.value for s in self.sliders)
         return {
             "n_plates": plates,
-            "width": size, "height": _map_height(size),
+            "width": SIZES[size][0], "height": SIZES[size][1],
             "land_fraction": land / 100,
             "margin_h": rough / 100,
             "river_threshold": RIVER_SCALE / rivers,
