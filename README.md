@@ -39,6 +39,7 @@ python test_terrain.py       # invariant checks
 | climate | `terrain/climate.py` | moisture capacity from sea surface temperature, gyre currents warming and cooling it by basin side, zonal rain belts, moisture marched downwind for orographic shadows, runoff and evaporation fields |
 | lakes and rivers | `terrain/rivers.py` | lake water balance, outlet carving, polyline extraction, meandering, discharge-based width, channel incision |
 | biomes | `terrain/climate.py` | temperature from latitude, lapse rate and continentality; biomes from temperature against rain relative to evapotranspiration |
+| trees | `terrain/trees.py` | canopy cover from moisture, timberline, gallery forest and grove noise; scattered into individual trees |
 
 Boundary type is never assigned by hand. The velocity field is constant inside
 each plate, so its derivatives are non-zero only where plates meet: negative
@@ -87,10 +88,13 @@ roughly 0.4 s at 256x192, 2.4 s at 512x384, 7 s at 768x576 and 18 s at 1024x768.
 viewer paints on the banner while it works.
 
 Layers: relief, elevation without water, tectonic relief (pre-texture),
-pre-erosion, plates, boundary classes, stress, rainfall, drainage, erosion
-delta, slope, land/coast, river width. The rainfall layer is ranked within the
-land distribution rather than scaled by it - rain is skewed enough that a linear
-ramp paints every interior the same tan.
+pre-erosion, plates, boundary classes, stress, rainfall, temperature, biomes,
+trees, drainage, erosion delta, slope, land/coast, river width, canopy. The
+rainfall layer is ranked within the land distribution rather than scaled by it -
+rain is skewed enough that a linear ramp paints every interior the same tan.
+`trees` takes the last number key ahead of `drainage`, which moves to `[` `]`:
+drainage is a layer you open to find out why a river went where it did, and
+trees is the world.
 
 Three separate fields would otherwise trace the plate partition and give it
 away even after the strain gating: the plate boundary itself, the crust step
@@ -244,7 +248,8 @@ world = generate(seed=12, n_plates=9, land_fraction=0.4, collision_h=1.8)
 drainage area weighted by runoff, so still in cells on average; `world.runoff`
 is that weight; `world.rivers` and `world.lakes` are masks; `world.tect` holds
 every plate field and `world.water` every water field, including the per-node
-`widths` of each polyline.
+`widths` of each polyline. `world.trees` holds the canopy `cover` field and the
+`pos`, `kind` and `size` of every individual tree.
 
 ## Climate
 
@@ -475,7 +480,135 @@ sea ramp draws it. Nothing but the renderer reads it.
 Two layers draw it - `temperature`, absolute so that freezing sits at a fixed
 place on the ramp, and `biomes` - and the main relief layer mixes the biome
 colour into its hypsometric tint at `biome_tint`, so height and vegetation read
-off the same map.
+off the same map. The trees go on over that at `tree_relief`; see below.
+
+## Trees
+
+The one stage that reads the finished world and changes nothing in it. Trees are
+the end product - what the plates, the rain and the rivers add up to on the
+ground - so the stage runs last, takes only finished fields, and feeds nothing
+back. It draws from its own generator, `default_rng([seed, 3])`, for the reason
+the climate stage does: drawing from the shared stream would move the river
+meanders on every seed the generator has ever made. Verified - `height`,
+`height_pre`, `height_eroded`, `biome`, `runoff` and `temp` all hash identically
+to the commit before this one on seeds 7, 3 and 21, with the same river and lake
+counts. Cost is 0.04 s of a 2.4 s build at 384x288.
+
+Two things come out. A `cover` field, canopy fraction per cell, which is what an
+engine scatters from; and a **point set**, which is what makes a forest look like
+trees rather than like a green wash. The field is the intermediate and the points
+are the product - the same move `rivers` makes by keeping polylines, because a
+scatter *is* positions and rasterising it is the lossy step.
+
+None of it is derivable from `biome.png`, and that is the point of the field
+being continuous. The biome grid is a thirteen-way cut - a cell is temperate
+forest or it is steppe - and every clearing, timberline and gallery strip in the
+world lives in the ground between those two answers. Four terms, all continuous:
+
+- **Moisture** sets it, off the same `climate.moisture_index` the biome bands are
+  cut from, smoothstepped between `tree_mi_open` and `tree_mi_closed`. Those
+  straddle the semiarid/subhumid cut at 0.7 on purpose: the classifier puts the
+  forest boundary there, and this says the ground either side of it is thinning
+  stands rather than a step.
+- **The timberline** is a fade over `tree_line_fade` degrees of warmest month
+  rather than the hard `TREE_C` cut a classifier needs. What a real mountain has
+  is a band where the forest thins and then stops.
+- **Gallery forest** puts trees along a river running through country whose own
+  rainfall could not keep them - the Nile and the Okavango are green lines drawn
+  on tan. Scaled by `(1 - cover)`, so it does nothing in a rainforest and
+  everything in a savanna: it stands in for water the rain did not supply, and
+  where the rain already did there is nothing left to add. Gated by the
+  timberline too, or a river carries forest over the tree line with it.
+- **Groves** clump the result, and the noise goes into the moisture index
+  *before* the curve rather than onto the cover after it. The curve saturates at
+  both ends, so noise applied to the output is flattened everywhere except the
+  middle band and a closed forest comes out with no clearings in it at all.
+
+The ordering that falls out, as mean cover over four seeds at 384x288, from one
+moisture curve and no per-biome table anywhere:
+
+| biome | cover | | biome | cover |
+|---|---|---|---|---|
+| temperate rainforest | 0.84 | | savanna | 0.36 |
+| tropical rainforest | 0.83 | | shrubland | 0.29 |
+| temperate forest | 0.66 | | steppe | 0.27 |
+| tropical seasonal | 0.57 | | hot desert | 0.14 |
+| taiga | 0.54 | | tundra | 0.11 |
+
+Land averages 0.34 cover with 24% of it closed (>0.7), and in dry country a
+riverbank carries **3.6 to 4.5 times** the canopy of ground eight cells away.
+Desert is not zero and should not be: the only trees a desert has stand where the
+water is, which is why `KIND_BY_BIOME` gives it palms.
+
+`scatter` places them on a jittered grid - one candidate per `tree_spacing`
+square, offset at random inside its own square, kept with probability `cover`.
+That is a Poisson disc without the rejection loop, which at these densities buys
+nothing a three-pixel stamp would show.
+
+**`tree_spacing` is deliberately not scaled with map size**, and it is the only
+pixel knob that is not. Every other one follows the map so a landform covers the
+same fraction of the world at any resolution - but a tree is drawn at a fixed
+stamp size, and holding its ground area fixed instead shrinks the canopy's
+texture as the map grows. What has to stay constant here is how a forest looks,
+not how many hectares a tree owns.
+
+Two things about the drawing were wrong first and are worth keeping written down,
+because both made the layer read as a slightly darker biome map:
+
+- **Spacing has to clear the stamp.** A crown is about three cells across, so at
+  the 1.3 it started on, a closed canopy piled four trees on every one that
+  showed and the layer drew as a flat green mass at every zoom. At 2.0 the crowns
+  touch and overlap slightly - which is what a closed canopy is - and a savanna at
+  a third of the cover comes out as separate trees with ground between them.
+- **The ground has to stop being green.** `LAND_RAMP` is green at every elevation
+  a forest grows at, and so is half of `BIOME_COLORS`. Trees painted onto that
+  are green on green and the canopy disappears into the ground it stands on. The
+  base keeps its biome tint, so bare land still looks like the country it belongs
+  to, but is pulled `GROUND_DESAT` of the way to its own luminance and warmed
+  back - over land only, since draining the sea of colour too just looks broken.
+
+Four kinds, because that is how many silhouettes read apart at map scale: a
+spire, a dome, a flat crown on a bare stem, and a dot. `KIND_BY_BIOME` is a
+look-up rather than a model - the climate that would decide leaf habit has
+already been run and banded, and re-deriving it would be the same cut drawn
+twice. Temperate rainforest is coniferous on purpose; the real ones are, from
+Sitka to Valdivia.
+
+That look-up on its own is a stencil, and it showed: a taiga cap on a mountain
+came out as a solid disc of conifer with a hard line round it, because every
+tree inside a thirteen-way cut gets the same answer and every tree one cell
+outside gets a different one. So `kind_mix` blurs the **composition** at
+`tree_mix`, and each tree draws its kind from the local mixture. This is the
+mirror of `biome_soften`, which blurs how a boundary is drawn and changes
+nothing about what is there; this changes what is there, and every individual
+tree still keeps one kind and one silhouette. A cell in a transition does not
+grow a half-conifer - it grows both, in the proportion its neighbourhood does.
+Masked to land and divided by the blurred mask, like `biome_rgb`, or a coastal
+forest loses a third of its trees to scrub because of the water offshore.
+
+At 6 px, 15% of land is still a pure stand and the rest carries some mix, which
+is the belt doing its job rather than mixing everything into an even scatter -
+`test_tree_kinds_blend_across_a_boundary` pins both ends, and checks that
+`tree_mix = 0` puts the hard lookup back. The kind is drawn *last* in `scatter`,
+after positions and sizes, so adding it left both exactly where they were on
+every existing seed.
+
+The relief layer draws them too, at `tree_relief` rather than full opacity.
+There they are texture and not the subject: the biome tint has already said
+where forest is, and what the stamps add is grain over it - a canopy that looks
+like canopy, an edge where it thins, and the gallery strips picking out rivers
+the hypsometric ramp draws as one blue line through uniform green. At 1.0 they
+bury the ramp and the layer stops being a relief map; at 0 they are off there,
+which is what the `trees` layer is for. Same `paint_trees`, one alpha
+multiplier, no second renderer.
+
+`paint_trees` composites kind by kind, not tree by tree: thirty thousand small
+slice assignments is a Python loop at map scale, four alpha grids is four
+vectorised passes, and the only thing lost is painter's order *within* one kind,
+which at three pixels a crown nobody can see. Alpha is clipped rather than
+normalised - where a canopy closes the stamps overlap and the sum runs past one,
+and that saturation is what makes a rainforest a solid mass while a savanna at a
+third of the cover stays a field of separate trees.
 
 ## Height, and how fast it cools
 
@@ -721,18 +854,31 @@ relief layer hillshades so lakes come out flat.
 
 ## Getting a world out
 
-`terrain/export.py` writes five files. A heightmap alone imports as grey rock:
+`terrain/export.py` writes six files. A heightmap alone imports as grey rock:
 the bed says what shape the land is, the lake depths say where water sits on it,
-the biome indices say what covers it, and the river paths are vectors because
-that is what they were before they were rasterised.
+the biome indices say what covers it, the canopy says how much of it, and the
+river paths are vectors because that is what they were before they were
+rasterised.
 
 | file | what it is |
 |---|---|
 | `_height16.png` | the bed, 16-bit greyscale |
 | `_lakes16.png` | lake depth, 16-bit, zero everywhere dry |
 | `_biome.png` | `climate` biome index per cell, 8-bit, names in the sidecar |
+| `_canopy.png` | canopy fraction, 8-bit, 0 to 1 |
 | `_rivers.json` | channel centrelines and per-node width |
 | `_config.json` | the seed, every knob, and a stamp of the code that read them |
+
+The canopy goes out as the density, not as the trees. An engine scattering
+vegetation has its own LOD budget and its own idea of what a tree is, and a
+raster it can sample at any density beats several hundred thousand positions it
+would have to thin out - the generator's own point set is a rendering of that
+field rather than the other way round. It gets `field8` and not `heightmap`,
+because `heightmap` normalises to the data's own range and writes a sidecar full
+of terrain (`metres_per_unit`, `sea_code`) which on a coverage fraction is not
+merely unused but wrong. Eight bits, too: the terrain needs sixteen because 256
+codes across a couple of height units terraces every plain, while a scatter
+density read to one part in 255 is already finer than any placement rule asks.
 
 The rasters are the result, and a lossy one: 16 bits is a third of a metre at
 `metres_per_unit`, and nothing in them carries the plates, the stress, the
@@ -806,7 +952,13 @@ the same thing in 1.7 KB.
 
 ## Not done yet
 
-Nothing human-made. Climate is annual-mean plus a seasonal half-range, which is
+Nothing human-made. Trees are one-directional by design and not by omission -
+they are the end product, so nothing reads `world.trees` but the renderer and the
+export, and vegetation does not resist erosion. That coupling is real (bare
+ground gullies where forested slopes stay soil-mantled) and would need a crude
+pre-canopy off the pre-rain pass to weight `erosion_k`, since erosion runs long
+before the climate does. It would also move every coastline on every seed, which
+is the reason it is not in. Climate is annual-mean plus a seasonal half-range, which is
 enough for Whittaker but not for Koppen-Geiger - that keys on *when* the rain
 falls, and the moisture march has no seasons to put it in. Ocean currents set
 the sea's temperature but not the land's: a warm current makes the coast beside
@@ -829,7 +981,7 @@ valley floor, in place of the blunt cap on lateral drift that version used.
 
 Cost is roughly 0.5 s at 256x192, 2.3 s at 512x384 and 16 s at 1024x768, and
 varies by 30-40% run to run on the same machine. Erosion is about half of it and
-the river stage most of the rest; climate is about 2% of it.
+the river stage most of the rest; climate is about 2% of it and trees another 2%.
 
 The large sizes used to be far worse (59 s at 1024x768). Seven changes, none of
 which alter the output - the fill, the accumulation, the halo and the handed-in

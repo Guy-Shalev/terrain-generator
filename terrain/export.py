@@ -119,6 +119,29 @@ def indexmap(a, path, names):
     })
 
 
+def field8(a, path, lo=0.0, hi=1.0, units="fraction"):
+    """A bounded continuous field as an 8-bit PNG, with its scale beside it.
+
+    Not `heightmap`. That one normalises to the data's own range and writes a
+    sidecar full of terrain - `metres_per_unit`, `sea_code` - which on a canopy
+    field is not merely unused but wrong. This takes the range as given, because
+    a coverage fraction has one whether or not this world reaches both ends of
+    it, and says only what it is.
+
+    Eight bits and not sixteen. The terrain needs the depth because 256 codes
+    across a couple of height units terraces every plain; a scatter density read
+    to one part in 255 is already finer than any placement rule will ask.
+    """
+    span = max(1e-9, hi - lo)
+    _write_png(path, np.rint(np.clip((np.asarray(a) - lo) / span, 0, 1) * 255
+                             ).astype(np.uint8), 8)
+    return _sidecar(path, {
+        "width": int(a.shape[1]), "height": int(a.shape[0]), "bits": 8,
+        "lo": lo, "hi": hi, "units_per_code": span / 255, "units": units,
+        "wrap": "x",
+    })
+
+
 def river_paths(water, path):
     """Channel centrelines as vectors, which is what they were before rasterising.
 
@@ -237,6 +260,12 @@ def bundle(world, parent="out/export"):
     heightmap(world.height, d / "height16.png")
     heightmap(world.water.lake_depth, d / "lakes16.png")
     indexmap(world.biome, d / "biome.png", climate.BIOME_NAMES)
+    # The density, not the trees. An engine scattering vegetation has its own
+    # LOD budget and its own idea of what a tree is, and a raster it can sample
+    # at any density beats several hundred thousand positions it would have to
+    # thin out - the generator's own point set is a rendering of this field,
+    # not the other way round.
+    field8(world.trees.cover, d / "canopy.png", units="canopy fraction")
     river_paths(world.water, d / "rivers.json")
     config(world.cfg, d / "config.json")
     return d

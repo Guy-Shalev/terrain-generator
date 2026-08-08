@@ -118,9 +118,18 @@ def water_map(w, shade=True):
     hypsometric ramp still says how high somewhere is while its hue says what
     grows there. Mixed in before shading, and only over land: the sea has its
     own narrow ramp and there is no biome under it to say anything.
+
+    Then the trees go on at `cfg.tree_relief`, well under full opacity. They are
+    texture here, not the subject: the biome tint has already said where forest
+    is, and what the stamps add is grain over it - a canopy that looks like
+    canopy, an edge where it thins, the gallery strips picking out rivers that
+    the ramp draws as one blue line through uniform green. At 1.0 they bury the
+    hypsometric ramp and the layer stops being a relief map; at 0 they are off,
+    which is what the `trees` layer is for.
     """
     rgb = relief(w.height, shade, surface=w.surface, tint=biome_rgb(w),
                  tint_mix=w.cfg.biome_tint)
+    rgb = paint_trees(rgb, w.trees, w.height.shape, w.cfg.tree_relief)
     return np.clip(overpaint_water(rgb, w), 0, 255).astype(np.uint8)
 
 
@@ -267,6 +276,118 @@ def temp_map(w):
                    0, 255).astype(np.uint8)
 
 
+# A tree, at map scale, is a silhouette three or four pixels across, and the
+# whole job of these is that the four kinds read apart at that size. Each is a
+# list of (dy, dx, weight) offsets from the trunk: a conifer is a spire, a
+# broadleaf a dome, a palm a flat crown carried wide of a thin stem, and scrub a
+# dot. Drawn as a colour ramp instead, all four are the same green.
+TREE_STAMPS = [
+    [(-2, 0, .40), (-1, 0, .85), (0, 0, 1.0), (0, -1, .45), (0, 1, .45), (1, 0, .65)],
+    [(-1, 0, .75), (-1, -1, .35), (-1, 1, .35), (0, 0, 1.0), (0, -1, .85),
+     (0, 1, .85), (1, 0, .70)],
+    [(-1, 0, .45), (0, 0, .90), (0, -1, .80), (0, 1, .80), (0, -2, .50), (0, 2, .50)],
+    [(0, 0, .75), (0, 1, .35)],
+]
+# Muted, and in the same family as BIOME_COLORS: these sit on top of the relief
+# ramp, and a saturated green turns the layer into a golf course.
+TREE_COLORS = np.array([
+    (26, 58, 44),       # conifer     - blue-green, and the darkest of the four
+    (52, 96, 50),       # broadleaf
+    (96, 130, 58),      # palm        - yellower, which is what dry country does
+    (114, 124, 72),     # scrub
+], dtype=float)
+TREE_SHADOW = np.array([16, 24, 20.0])
+TREE_SHADOW_A = 0.38    # alpha of the offset shadow pass
+
+
+def _splat(shape, ys, xs, offsets, weights):
+    """Accumulate one stamp over every tree at once: one pass per offset, not
+    per tree. Wraps in x and clamps in y, like every other neighbour read."""
+    h, w = shape
+    acc = np.zeros(shape)
+    for dy, dx, a in offsets:
+        np.add.at(acc, (np.clip(ys + dy, 0, h - 1), (xs + dx) % w), a * weights)
+    return acc
+
+
+def paint_trees(rgb, t, shape, strength=1.0):
+    """Stamp individual trees over whatever the ground was painted with.
+
+    `strength` scales every alpha, crowns and shadow alike, for the relief layer:
+    there the trees are texture over a hypsometric ramp that is still doing the
+    talking, and at full opacity they bury it.
+
+    Composited kind by kind rather than tree by tree. Thirty thousand small
+    slice assignments is a Python loop at map scale; four alpha grids is four
+    vectorised passes, and the only thing lost is the painter's order *within* a
+    kind, which at three pixels a crown nobody can see.
+
+    Alpha is clipped, not normalised. Where a canopy closes, stamps overlap and
+    the sum runs well past one - that saturation *is* closed canopy, and it is
+    what makes a rainforest read as a solid mass while a savanna at a third of
+    the cover stays a field of separate trees.
+    """
+    if len(t) == 0 or strength <= 0:
+        return rgb
+    ys = np.clip(t.pos[:, 0].astype(int), 0, shape[0] - 1)
+    xs = t.pos[:, 1].astype(int) % shape[1]
+    # One shadow pass for every kind together, offset down-right to agree with
+    # the hillshade's north-west sun. Under it the canopy gains depth; without
+    # it the trees look printed on.
+    shade = np.clip(_splat(shape, ys + 1, xs + 1, [(0, 0, 1.0)], t.size), 0, 1)
+    sa = (TREE_SHADOW_A * strength * shade)[..., None]
+    rgb = rgb * (1 - sa) + TREE_SHADOW * sa
+    for k, offsets in enumerate(TREE_STAMPS):
+        m = t.kind == k
+        if not m.any():
+            continue
+        a = strength * np.clip(
+            _splat(shape, ys[m], xs[m], offsets, t.size[m]), 0, 1)[..., None]
+        rgb = rgb * (1 - a) + TREE_COLORS[k] * a
+    return rgb
+
+
+GROUND_DESAT = 0.62     # how far the base is pulled towards its own luminance
+GROUND_WARM = np.array([1.06, 1.00, 0.88])   # and then back towards earth
+
+
+def tree_map(w):
+    """The trees, on ground the colour of ground.
+
+    The base keeps its biome tint - what is interesting here is the boundary
+    between what has trees on it and what does not, and that only reads if the
+    bare land beside a forest looks like the country it belongs to rather than
+    like blank paper - but it is desaturated first, hard.
+
+    That is the whole difference between this layer working and not. `LAND_RAMP`
+    is green at every elevation a forest grows at and so is half of
+    `BIOME_COLORS`, so trees painted straight onto it are green on green: the
+    canopy disappears into the ground it stands on and the layer reads as a
+    slightly darker biome map. Pulled towards luminance and warmed back, the
+    ground keeps its relief and its regions while green becomes something only
+    vegetation has.
+    """
+    base = relief(w.height, surface=w.surface, tint=biome_rgb(w), tint_mix=0.5)
+    lum = base @ np.array([0.30, 0.59, 0.11])
+    # Land only. The sea has no vegetation to distinguish itself from, and
+    # draining it of colour along with the ground turns the ocean slate grey and
+    # the map into something that looks broken rather than deliberate.
+    ground = (base * (1 - GROUND_DESAT) + lum[..., None] * GROUND_DESAT) * GROUND_WARM
+    base = np.where(w.land[..., None], ground * 0.94, base)
+    return np.clip(overpaint_water(paint_trees(base, w.trees, w.height.shape), w),
+                   0, 255).astype(np.uint8)
+
+
+def canopy_map(w):
+    """The density field the trees were scattered from, on its own."""
+    base = relief(w.height, shade=True) * 0.45
+    cov = _ramp(w.trees.cover, [(0.0, (198, 180, 144)), (0.35, (150, 164, 96)),
+                                (0.7, (74, 122, 62)), (1.0, (26, 66, 42))])
+    return np.clip(overpaint_water(
+        np.where(w.land[..., None], cov * 0.78 + base * 0.5, base), w),
+        0, 255).astype(np.uint8)
+
+
 def land_mask(h, lakes=None):
     rgb = np.where((h > 0)[..., None], np.array([232, 226, 208.0]),
                    np.array([28, 52, 84.0]))
@@ -303,11 +424,16 @@ LAYERS = [
     # first eleven layers only, and these two are worth reaching for.
     ("temperature", temp_map),
     ("biomes", biome_map),
+    # Trees take the last number key, ahead of drainage. Both were worth
+    # reaching for and only one can have it: drainage is a layer you open to
+    # find out why a river went where it did, and this one is the world.
+    ("trees", tree_map),
     ("drainage", lambda w: flow(w.flow, w.height, w.cfg.river_threshold * w.height.size)),
     ("erosion delta", lambda w: erosion_diff(w.height_pre, w.height_eroded)),
     ("slope", lambda w: slope_map(w.height)),
     ("land / coast", lambda w: land_mask(w.height, w.lakes)),
     ("river width", lambda w: river_width_map(w)),
+    ("canopy", canopy_map),
 ]
 
 

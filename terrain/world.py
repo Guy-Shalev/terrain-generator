@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, asdict, replace
 
 import numpy as np
 
-from . import climate, elevation, hydrology, rivers, tectonics
+from . import climate, elevation, hydrology, rivers, tectonics, trees
 
 
 @dataclass
@@ -238,6 +238,38 @@ class Config:
     meander_period: float = 30.0        # along-path wavelength, in cells
     meander_taper: float = 8.0          # vertices over which the swing fades out
 
+    # --- trees ---
+    # Where a canopy opens and where it closes, on `climate.moisture_index`.
+    # Straddles MI_BANDS' semiarid/subhumid cuts on purpose: the biome grid puts
+    # the forest boundary at 0.7, and these say that the ground either side of
+    # it is thinning stands rather than a step from steppe to forest.
+    tree_mi_open: float = 0.45
+    tree_mi_closed: float = 1.5
+    tree_line_fade: float = 5.0     # C of warmest month over which forest thins out
+    tree_gallery: float = 0.75      # canopy a bank gets that its own rain would not
+    tree_gallery_reach: float = 3.0  # px from water that reaches
+    tree_grove: float = 0.55        # clumping, in std devs of the noise on `mi`
+    tree_grove_periods: float = 22.0
+    # Spacing has to clear the stamp, or the trees stop being trees. A crown is
+    # about three cells across, so at 1.3 a closed canopy piles four of them on
+    # every one that shows and the layer draws as a flat green mass at any zoom.
+    # At 2.0 the crowns touch and overlap slightly, which is what a closed
+    # canopy is, and a savanna at a third of the cover comes out as separate
+    # trees with ground between them.
+    tree_spacing: float = 2.0       # px between trees under a closed canopy
+    tree_size_var: float = 0.35     # lognormal sigma on trunk size
+    # px over which one kind of tree gives way to another. Blurs the *mix*, not
+    # the colours: at 0 a biome boundary is a hard line between two species, and
+    # what a real one has is a belt of mixed stand several times wider than a
+    # cell. Wider than `biome_soften` because this is ecology rather than
+    # anti-aliasing - the belt is a real place, not a soft edge.
+    tree_mix: float = 6.0
+    # Opacity of the trees on the *relief* layer, where they are grain over a
+    # hypsometric ramp that is still doing the talking. The `trees` layer draws
+    # them at full strength on ground desaturated to make room; this one cannot
+    # do that without ceasing to be a relief map. 0 turns them off there.
+    tree_relief: float = 0.55
+
 
 # Knobs measured in pixels. `Config` is tuned at `ref_width`, and these have to
 # follow the map or the world changes shape as it is resized: a landform of
@@ -256,6 +288,10 @@ _PX_FIELDS = (
     "margin_zone", "margin_reach", "margin_cut_offset",
     "margin_cut_w", "margin_slope_blur", "meander_period", "meander_taper",
     "meander_amp", "river_width", "river_width_max",
+    # `tree_spacing` is deliberately absent: see `trees.scatter`. It is the one
+    # pixel quantity here whose job is how the map looks rather than how much
+    # ground something covers.
+    "tree_gallery_reach", "tree_mix",
 )
 # Rises per cell: the same climb spread over more cells is a gentler one. The
 # two rain rates go here for the same reason - moisture must cross a continent
@@ -302,6 +338,7 @@ class World:
     temp: np.ndarray            # mean annual temperature, C
     swing: np.ndarray           # seasonal half-range, C; warmest month is temp+swing
     biome: np.ndarray           # climate.BIOME_NAMES index per cell
+    trees: trees.Trees          # canopy cover, and the individual trees on it
     timings: dict = field(default_factory=dict)
 
     @property
@@ -336,6 +373,7 @@ class World:
             "rain": float(self.runoff[y, x]),
             "temp": float(self.temp[y, x]),
             "biome": climate.BIOME_NAMES[int(self.biome[y, x])],
+            "canopy": float(self.trees.cover[y, x]) if self.trees else 0.0,
             "dist_to_boundary": float(self.tect.dist[y, x]),
             "river_w": float(w.width[y, x]),
             "lake_depth": float(w.lake_depth[y, x]),
@@ -440,9 +478,17 @@ def generate(cfg=None, verbose=True, on_stage=None, **overrides):
 
     world = World(cfg=cfg, tect=tect, height_raw=raw, height_pre=pre,
                   height_eroded=eroded, height=h, water=water, runoff=runoff,
-                  temp=temp, swing=swing, biome=biome, timings=timings)
+                  temp=temp, swing=swing, biome=biome, trees=None, timings=timings)
+    # Last, and off its own generator. Trees read the finished world and change
+    # nothing in it, so this stage cannot move anything upstream of it - but it
+    # would if it drew from `rng`, which is why it does not: every seed the
+    # generator has ever made still builds the same terrain, rivers and biomes
+    # with this stage present as it did without it.
+    world.trees = stage("trees", lambda: trees.build(
+        world, np.random.default_rng([cfg.seed, 3])))
     if verbose:
         print(f"  {'total':<12} {sum(timings.values()):6.2f}s  "
               f"land={world.land.mean():.0%}  max={h.max():.2f}  min={h.min():.2f}  "
-              f"lakes={water.lake_id.max()}  rivers={len(water.polylines)}")
+              f"lakes={water.lake_id.max()}  rivers={len(water.polylines)}  "
+              f"trees={len(world.trees)}")
     return world

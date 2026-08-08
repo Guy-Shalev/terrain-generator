@@ -9,7 +9,7 @@ import numpy as np
 from scipy import ndimage
 
 from terrain import Config, generate
-from terrain import climate, export, grid, hydrology, noise, render, rivers, world
+from terrain import climate, export, grid, hydrology, noise, render, rivers, trees, world
 
 
 def test_grid_wraps():
@@ -857,6 +857,88 @@ def test_config_stamp_flags_a_different_generator():
         assert len(caught) == 2, [str(c.message) for c in caught]
 
 
+def test_trees_grow_where_they_should():
+    """Cover has to respect the four things that can forbid a tree outright,
+    and the scatter has to land on the cover rather than beside it."""
+    w = generate(Config(width=192, height=144, seed=4, erosion_passes=2),
+                 verbose=False)
+    t = w.trees
+    assert 0.0 <= t.cover.min() and t.cover.max() <= 1.0
+    for name, forbidden in (("sea", ~w.land), ("lake", w.lakes),
+                            ("ice", w.biome == climate.ICE),
+                            ("above the tree line",
+                             (w.temp + w.swing) < climate.TREE_C)):
+        assert t.cover[forbidden].max(initial=0.0) == 0.0, f"canopy on {name}"
+
+    assert len(t) > 0, "no trees scattered at all"
+    ys, xs = t.pos[:, 0].astype(int), t.pos[:, 1].astype(int) % w.height.shape[1]
+    assert w.land[ys, xs].all(), "a tree was placed in the water"
+    assert (t.cover[ys, xs] > 0).all(), "a tree was placed on bare cover"
+    assert set(np.unique(t.kind)) <= set(range(len(trees.KIND_NAMES)))
+
+    # The moisture axis has to come through: closed-canopy biomes must carry
+    # more of it than the dry ones, or the field is noise with a mask on it.
+    wet = np.isin(w.biome, [climate.TEMPERATE_FOREST, climate.TROPICAL_RAINFOREST,
+                            climate.TEMPERATE_RAINFOREST, climate.TAIGA])
+    dry = np.isin(w.biome, [climate.HOT_DESERT, climate.COLD_DESERT, climate.STEPPE])
+    if wet.any() and dry.any():
+        assert t.cover[wet].mean() > 2 * t.cover[dry].mean(), \
+            f"forest {t.cover[wet].mean():.2f} vs dry {t.cover[dry].mean():.2f}"
+
+
+def test_tree_kinds_blend_across_a_boundary():
+    """A species boundary must be a belt of mixed stand, not a stencil edge."""
+    cfg = Config(width=192, height=144, seed=4, erosion_passes=2)
+    w = generate(cfg, verbose=False)
+    mix = trees.kind_mix(w.biome, w.land, w.cfg)
+    # A distribution over land, which is the only place it is sampled; out at
+    # sea it is zero rather than arbitrary.
+    assert np.allclose(mix.sum(-1)[w.land], 1.0), "kinds must be a distribution"
+
+    # The interior of a region stays pure - mixing everything would just be a
+    # different way of losing the boundary - while a real share of the land is
+    # in transition rather than committed to one kind.
+    top = mix.max(-1)[w.land]
+    assert top.max() > 0.98, "no pure stand anywhere; the mix blurred everything"
+    assert (top < 0.9).mean() > 0.15, f"only {(top < 0.9).mean():.0%} of land is mixed"
+
+    # And the trees actually take it: the hard lookup would put exactly one kind
+    # on every cell of a given biome, so finding two inside one biome is the
+    # whole difference.
+    t = w.trees
+    ys, xs = t.pos[:, 0].astype(int), t.pos[:, 1].astype(int) % w.height.shape[1]
+    b = w.biome[ys, xs]
+    mixed = [len(set(t.kind[b == v].tolist())) for v in np.unique(b)
+             if (b == v).sum() > 40]
+    assert max(mixed) > 1, "every biome grew a single species; kinds did not blend"
+
+    # Turning the knob off has to restore the stencil, or the test above is
+    # passing on something other than the mixing.
+    hard = generate(Config(**{**cfg.__dict__, "tree_mix": 0.0}), verbose=False)
+    hm = trees.kind_mix(hard.biome, hard.land, hard.cfg)
+    assert hm.max(-1)[hard.land].min() == 1.0, "tree_mix=0 must be a hard lookup"
+
+
+def test_gallery_forest_follows_the_rivers():
+    """The one thing here that a biome map cannot say: trees somewhere its own
+    rainfall would not keep them, because a river runs through it."""
+    w = generate(Config(width=192, height=144, seed=4, erosion_passes=2),
+                 verbose=False)
+    d = grid.edt(~(w.rivers | w.lakes))
+    # Dry country only. In a rainforest the term is designed to do nothing, so
+    # averaging over all land would drown the effect in ground that was already
+    # covered.
+    arid = w.land & (w.runoff < np.median(w.runoff[w.land]))
+    bank, inland = arid & (d <= 2), arid & (d > 8)
+    assert bank.any() and inland.any()
+    assert w.trees.cover[bank].mean() > 1.5 * w.trees.cover[inland].mean(), \
+        f"bank {w.trees.cover[bank].mean():.2f} vs inland " \
+        f"{w.trees.cover[inland].mean():.2f}"
+    # And it must stop at the tree line rather than riding a river over it.
+    cold = w.land & ((w.temp + w.swing) < climate.TREE_C) & (d <= 2)
+    assert w.trees.cover[cold].max(initial=0.0) == 0.0, "gallery crossed the tree line"
+
+
 def test_world():
     w = generate(Config(width=128, height=96, seed=5, erosion_passes=2), verbose=False)
     assert w.height.shape == (96, 128)
@@ -878,8 +960,8 @@ def test_world():
     with tempfile.TemporaryDirectory() as d:
         out = export.bundle(w, d)
         assert out.name == f"seed{w.cfg.seed}"
-        for f in ("height16.png", "lakes16.png", "biome.png", "rivers.json",
-                  "config.json"):
+        for f in ("height16.png", "lakes16.png", "biome.png", "canopy.png",
+                  "rivers.json", "config.json"):
             assert (out / f).exists(), f
         # A second export must not land on the first: these are kept, and an
         # overwrite is the one mistake that cannot be undone from outside.

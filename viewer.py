@@ -286,7 +286,7 @@ class Viewer:
                 elif d["river_w"] > 0:
                     extra = f"  river {d['river_w']:.1f} wide"
                 if d["elev"] > 0:
-                    extra += f"  {d['biome']}"
+                    extra += f"  {d['biome']}  canopy {d['canopy']:.2f}"
                 self.text(f"h {d['elev']:+.3f}  plate {d['plate']:>2} {d['crust'][:4]}"
                           f"  bnd {d['dist_to_boundary']:.0f}px  rain {d['rain']:.2f}"
                           f"  {d['temp']:+.0f}C  flow {d['flow']:.0f}{extra}",

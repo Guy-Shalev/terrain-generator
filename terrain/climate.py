@@ -367,20 +367,20 @@ def precip_mm(cfg):
     return max(1.0, cfg.precip_mean_mm * (1.0 + cfg.rain_per_degree * cfg.temp_offset))
 
 
-def biomes(h, temp, swing, runoff, cfg, sea_level=0.0):
-    """What grows where: temperature against rain *for that temperature*.
+def moisture_index(temp, swing, runoff, cfg):
+    """Rain relative to what the local heat can evaporate. The moisture axis.
 
-    The moisture axis is not millimetres. `runoff` is already precipitation
-    normalised to average one over land, so a constant turns it back into a
-    depth - but a depth on its own says nothing, because the same rain that
-    keeps a cold place in forest leaves a hot one bare. Divide it by potential
-    evapotranspiration, which Holdridge reads straight off temperature, and the
-    axis becomes how wet somewhere is relative to its own thirst. That single
-    division is what puts the Gobi (cold, dry, and arid) and the tundra (cold,
-    dry, and yet humid) in different biomes instead of painting both as desert.
+    Not millimetres. `runoff` is already precipitation normalised to average one
+    over land, so a constant turns it back into a depth - but a depth on its own
+    says nothing, because the same rain that keeps a cold place in forest leaves
+    a hot one bare. Divide it by potential evapotranspiration, which Holdridge
+    reads straight off temperature, and the axis becomes how wet somewhere is
+    relative to its own thirst. That single division is what puts the Gobi
+    (cold, dry, and arid) and the tundra (cold, dry, and yet humid) in different
+    biomes instead of painting both as desert.
 
-    Then the two extremes that no matrix handles, because they are set by the
-    warmest month rather than the mean: permanent ice, and the tree line.
+    Its own function because two stages band it differently: `biomes` cuts it
+    into humidity provinces, and `trees` reads it as a continuum.
     """
     # Biotemperature, not the annual mean: the year averaged with every month
     # below freezing counted as zero, because nothing grows or transpires in
@@ -396,10 +396,21 @@ def biomes(h, temp, swing, runoff, cfg, sea_level=0.0):
         biotemp += np.clip(temp + swing * np.cos(phase), 0.0, 30.0)
     biotemp /= 12.0
     # Floored at Holdridge's own polar line. Below it the cell is ice or tundra
-    # by the overrides at the bottom of this function anyway, and the only job
-    # left for the floor is to keep the division finite.
+    # by the overrides in `biomes` anyway, and the only job left for the floor
+    # is to keep the division finite.
     pet = np.maximum(58.93 * biotemp, 58.93 * 1.5)      # mm/yr
-    mi = precip_mm(cfg) * runoff / pet
+    return precip_mm(cfg) * runoff / pet
+
+
+def biomes(h, temp, swing, runoff, cfg, sea_level=0.0):
+    """What grows where: temperature against rain *for that temperature*.
+
+    The moisture axis is `moisture_index`, banded into Holdridge's humidity
+    provinces, against mean annual temperature. Then the two extremes that no
+    matrix handles, because they are set by the warmest month rather than the
+    mean: permanent ice, and the tree line.
+    """
+    mi = moisture_index(temp, swing, runoff, cfg)
     # Banded straight off the raw fields, every hill that crosses a cut puts a
     # lone cell of another biome in the middle of one, and the map comes out
     # speckled rather than regional. A short blur first costs nothing and only
