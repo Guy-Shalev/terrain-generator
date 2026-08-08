@@ -300,13 +300,19 @@ def _swing(lat, closed, cfg):
 
 
 # Biome ids. Ocean is 0, so an empty grid reads as all sea.
-(OCEAN, ICE, TUNDRA, TAIGA, COLD_DESERT, STEPPE, TEMPERATE_FOREST,
- TEMPERATE_RAINFOREST, SHRUBLAND, HOT_DESERT, SAVANNA, TROPICAL_SEASONAL,
- TROPICAL_RAINFOREST) = range(13)
+#
+# One desert, not a hot one and a cold one. Desert is a rainfall class - the
+# arid row below is picked by moisture index alone - and splitting that row on
+# temperature put a cut through the middle of the driest ground, at the mode of
+# its own distribution: cells half a degree apart came out as two biomes with
+# two names and two colours. Nothing downstream ever read the difference.
+(OCEAN, ICE, TUNDRA, TAIGA, DESERT, STEPPE, TEMPERATE_FOREST,
+ TEMPERATE_RAINFOREST, SHRUBLAND, SAVANNA, TROPICAL_SEASONAL,
+ TROPICAL_RAINFOREST) = range(12)
 
 BIOME_NAMES = [
-    "ocean", "ice", "tundra", "taiga", "cold desert", "steppe",
-    "temperate forest", "temperate rainforest", "shrubland", "hot desert",
+    "ocean", "ice", "tundra", "taiga", "desert", "steppe",
+    "temperate forest", "temperate rainforest", "shrubland",
     "savanna", "tropical seasonal forest", "tropical rainforest",
 ]
 
@@ -331,13 +337,13 @@ ICE_C = 0.0     # warmest month below this and nothing ever thaws
 TREE_C = 6.0    # warmest month below this and nothing grows tall
 
 # Short names, so the table below reads as one.
-_CD, _HD, _TU, _TA, _ST, _SH, _SV = (COLD_DESERT, HOT_DESERT, TUNDRA, TAIGA,
-                                     STEPPE, SHRUBLAND, SAVANNA)
+_DE, _TU, _TA, _ST, _SH, _SV = (DESERT, TUNDRA, TAIGA, STEPPE, SHRUBLAND,
+                                SAVANNA)
 _TF, _TR, _PS, _PR = (TEMPERATE_FOREST, TEMPERATE_RAINFOREST,
                       TROPICAL_SEASONAL, TROPICAL_RAINFOREST)
 BIOME_MATRIX = np.array([
     # polar subpolar cool temperate subtropical tropical
-    [_CD, _CD, _CD, _CD, _HD, _HD],     # arid       mi < 0.25
+    [_DE, _DE, _DE, _DE, _DE, _DE],     # arid       mi < 0.25
     [_TU, _TU, _ST, _ST, _SH, _SV],     # semiarid   mi < 0.5
     [_TU, _TA, _TA, _TF, _PS, _PS],     # subhumid   mi < 1.1
     # Tropical humid is rainforest and not seasonal forest: potential

@@ -213,15 +213,15 @@ def test_biome_placement():
     b = climate.biomes(h, temp, swing, runoff, cfg)[:, 0]
 
     assert b[0] == climate.TROPICAL_RAINFOREST, "hot and soaked is not rainforest"
-    assert b[1] == climate.HOT_DESERT, "hot and dry is not desert"
+    assert b[1] == climate.DESERT, "hot and dry is not desert"
     # Rows 1 and 2 get *the same rainfall*, 24 degrees apart. A lookup on
     # millimetres has to return the same biome for both. Dividing by what the
     # heat can evaporate makes the cold one merely damp - and it is that one
     # assertion which fails if the PET term is ever dropped.
-    assert b[2] not in (climate.HOT_DESERT, climate.COLD_DESERT), \
+    assert b[2] != climate.DESERT, \
         "the same rain that leaves a desert at 28C must not at 4C"
     assert b[3] == climate.ICE, "nothing above freezing all year must be ice"
-    assert b[4] == climate.COLD_DESERT, "cold and genuinely arid is cold desert"
+    assert b[4] == climate.DESERT, "cold and genuinely arid is still desert"
     assert climate.biomes(np.full(shape, -0.1), temp, swing, runoff, cfg).max() \
         == climate.OCEAN, "below sea level must be ocean whatever the climate"
 
@@ -504,7 +504,7 @@ def test_temperature_slider_moves_a_whole_climate():
                 np.concatenate([w.temp[:16], w.temp[-16:]]).mean())
 
     for w in (cold, warm):
-        d = share(w, climate.HOT_DESERT, climate.COLD_DESERT)
+        d = share(w, climate.DESERT)
         assert 0.12 < d < 0.45, f"desert is {d:.0%} of land at {w.cfg.temp_offset:+.0f}"
     # A warm world is a flatter one, and the slider means what it says on land.
     assert gradient(warm) < gradient(cold) - 15, \
@@ -880,7 +880,7 @@ def test_trees_grow_where_they_should():
     # more of it than the dry ones, or the field is noise with a mask on it.
     wet = np.isin(w.biome, [climate.TEMPERATE_FOREST, climate.TROPICAL_RAINFOREST,
                             climate.TEMPERATE_RAINFOREST, climate.TAIGA])
-    dry = np.isin(w.biome, [climate.HOT_DESERT, climate.COLD_DESERT, climate.STEPPE])
+    dry = np.isin(w.biome, [climate.DESERT, climate.STEPPE])
     if wet.any() and dry.any():
         assert t.cover[wet].mean() > 2 * t.cover[dry].mean(), \
             f"forest {t.cover[wet].mean():.2f} vs dry {t.cover[dry].mean():.2f}"
@@ -937,6 +937,33 @@ def test_gallery_forest_follows_the_rivers():
     # And it must stop at the tree line rather than riding a river over it.
     cold = w.land & ((w.temp + w.swing) < climate.TREE_C) & (d <= 2)
     assert w.trees.cover[cold].max(initial=0.0) == 0.0, "gallery crossed the tree line"
+
+
+def test_biome_legend_matches_the_map():
+    """A key is only worth drawing if every biome on the map is in it, and if
+    no two swatches are close enough to be mistaken for each other."""
+    w = generate(Config(width=256, height=192, seed=7, erosion_passes=2),
+                 verbose=False)
+    ids = render.present_biomes(w)
+    assert ids == sorted(set(w.biome[w.land].tolist()) - {climate.OCEAN}), \
+        "the key and the land disagree about which biomes are here"
+    # Every pair, not just the ones this seed happens to show: a new colour that
+    # collides with an old one has to fail when it is added, not two seeds later.
+    c = render.LEGEND_COLORS[1:]
+    d = np.linalg.norm(c[:, None, :] - c[None, :, :], axis=-1)
+    np.fill_diagonal(d, np.inf)
+    i, j = np.unravel_index(d.argmin(), d.shape)
+    assert d.min() > 40, (f"{climate.BIOME_NAMES[i + 1]} and "
+                          f"{climate.BIOME_NAMES[j + 1]} are {d.min():.0f} apart")
+    # Borders run between two land biomes and nowhere else - not round the
+    # coast, which the sea ramp already draws, and not across the water.
+    edges = render.biome_edges(w)
+    assert edges.any(), "no biome borders found"
+    assert not (edges & (~w.land | w.rivers | w.lakes)).any(), "border off the land"
+    # The key itself has to be on the image, and over the emptiest corner.
+    img = render.legend_biome_map(w)
+    assert (img == np.round(render.LEGEND_PAPER).astype(np.uint8)).all(-1).any(), \
+        "no legend panel was drawn"
 
 
 def test_world():

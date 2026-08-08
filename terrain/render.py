@@ -1,7 +1,7 @@
 """Layer rendering: numpy height/plate fields -> uint8 RGB images."""
 import numpy as np
 
-from . import grid
+from . import climate, grid
 
 SEA_RAMP = [
     (-1.00, (11, 30, 64)), (-0.70, (13, 36, 75)), (-0.45, (16, 44, 88)),
@@ -216,12 +216,11 @@ BIOME_COLORS = np.array([
     (240, 246, 252),    # ice
     (154, 158, 146),    # tundra
     (58, 94, 78),       # taiga
-    (168, 164, 148),    # cold desert          grey, against the hot desert's tan
+    (224, 190, 128),    # desert               one class, picked by rain alone
     (176, 182, 108),    # steppe
     (92, 134, 74),      # temperate forest
     (48, 102, 70),      # temperate rainforest
     (150, 138, 86),     # shrubland            olive-brown, against steppe's green
-    (224, 190, 128),    # hot desert
     (202, 176, 92),     # savanna
     (122, 152, 64),     # tropical seasonal forest
     (34, 96, 48),       # tropical rainforest
@@ -257,6 +256,163 @@ def biome_map(w):
     rgb = np.where(w.land[..., None], rgb * (0.78 + 0.38 * hillshade(w.height)[..., None]),
                    hypsometric(w.height))
     return np.clip(overpaint_water(rgb, w), 0, 255).astype(np.uint8)
+
+
+# A palette for the legend layer, and the one place the biome colours are meant
+# to be told apart rather than blended into a relief. `BIOME_COLORS` is muted on
+# purpose - it gets mixed into the main view - and half of it is a green, which
+# is right there and useless against a key. These are picked for distance from
+# each other first and plausibility second, since the panel says what each one
+# is. Ocean is never drawn from this; the sea ramp handles it.
+LEGEND_COLORS = np.array([
+    (37, 86, 134),      # ocean, only ever a placeholder
+    (238, 244, 250),    # ice
+    (176, 166, 150),    # tundra                warm grey
+    (46, 92, 64),       # taiga                 dark green
+    (234, 176, 104),    # desert                orange-tan
+    (198, 206, 116),    # steppe                chartreuse, off the desert tan
+    (92, 158, 72),      # temperate forest      mid green
+    (22, 126, 124),     # temperate rainforest  teal, well off taiga
+    (166, 140, 80),     # shrubland             olive-brown
+    (214, 158, 60),     # savanna               gold, darker than steppe
+    (140, 182, 62),     # tropical seasonal     lime
+    (10, 74, 34),       # tropical rainforest   darkest green, clear of taiga
+], dtype=float)
+
+LEGEND_FONT = "georgia,timesnewroman,serif"
+LEGEND_PAPER = np.array([250.0, 248.0, 243.0])
+LEGEND_INK = np.array([28.0, 26.0, 24.0])
+LEGEND_PAD = 8
+
+
+def _legend_font(size, _cache={}):
+    # pygame only for its font rasteriser, and only on this layer, so importing
+    # `terrain` still costs nothing but numpy and scipy.
+    if size not in _cache:
+        import pygame
+        pygame.font.init()
+        _cache[size] = pygame.font.SysFont(LEGEND_FONT, size)
+    return _cache[size]
+
+
+def _glyph(ch, size, _cache={}):
+    """One rasterised letter as an alpha array, and how far to step after it."""
+    import pygame
+    key = (ch, size)
+    if key not in _cache:
+        img = _legend_font(size).render(ch, True, (255, 255, 255))
+        _cache[key] = (pygame.surfarray.array_alpha(img).T.astype(float) / 255.0,
+                       img.get_width())
+    return _cache[key]
+
+
+def _draw_text(rgb, text, size, y, x, ink):
+    """Stamp `text` into `rgb` with its top-left at (y, x). Clipped, not wrapped:
+    the panel is drawn at a size that fits, and a map too small for it would
+    rather lose the overhang than raise."""
+    h, w = rgb.shape[:2]
+    for ch in text:
+        a, adv = _glyph(ch, size)
+        th, tw = a.shape
+        ys, xs = np.arange(y, y + th), np.arange(x, x + tw)
+        ky, kx = (ys >= 0) & (ys < h), (xs >= 0) & (xs < w)
+        if ky.any() and kx.any():
+            al = a[ky][:, kx][..., None]
+            box = rgb[ys[ky][:, None], xs[kx][None, :]]
+            rgb[ys[ky][:, None], xs[kx][None, :]] = box * (1 - al) + ink * al
+        x += adv
+    return rgb
+
+
+def _fill(rgb, y0, y1, x0, x1, colour):
+    """Paint a rectangle, clipped to the image rather than wrapped."""
+    h, w = rgb.shape[:2]
+    y0, y1, x0, x1 = max(0, y0), min(h, y1), max(0, x0), min(w, x1)
+    if y1 > y0 and x1 > x0:
+        rgb[y0:y1, x0:x1] = colour
+    return rgb
+
+
+def present_biomes(w):
+    """The biomes this world actually has on land, in id order.
+
+    Id order runs cold to hot and dry to wet, the same order the classification
+    table is written in, so the key reads as the axes it came from rather than
+    as a list.
+    """
+    return [b for b in range(1, len(LEGEND_COLORS)) if (w.biome[w.land] == b).any()]
+
+
+def _corner(shape, land, box_h, box_w):
+    """Top-left of the emptiest corner: a key belongs over water, not a coast."""
+    h, w = shape
+    corners = [(8, 8), (8, w - box_w - 8), (h - box_h - 8, 8),
+               (h - box_h - 8, w - box_w - 8)]
+    return min(corners, key=lambda c: land[max(0, c[0]):c[0] + box_h,
+                                           max(0, c[1]):c[1] + box_w].mean())
+
+
+def draw_legend(rgb, ids, land, size=None):
+    """A key in the emptiest corner: a swatch and a name per biome on this map."""
+    h, w = rgb.shape[:2]
+    size = size or int(np.clip(round(w / 54), 9, 16))
+    f = _legend_font(size)
+    row = int(f.get_height() * 1.3)
+    sw = int(f.get_height() * 0.9)
+    names = [climate.BIOME_NAMES[b] for b in ids]
+    # Measured with the advances the text is actually drawn with, not the
+    # font's own metric for the whole string: they differ by a pixel a letter,
+    # and the longest name in the key runs off the panel it sized.
+    box_w = LEGEND_PAD * 2 + sw + 8 + max(
+        sum(_glyph(c, size)[1] for c in n) for n in names)
+    box_h = LEGEND_PAD * 2 + row * len(ids)
+    y0, x0 = _corner((h, w), land, box_h, box_w)
+    _fill(rgb, y0, y0 + box_h, x0, x0 + box_w, LEGEND_PAPER)
+    for i, (b, name) in enumerate(zip(ids, names)):
+        top, left = y0 + LEGEND_PAD + i * row, x0 + LEGEND_PAD
+        # Outlined, then filled a pixel in: ice and the paper behind it are the
+        # same near-white, and without the keyline that swatch is not there.
+        _fill(rgb, top, top + sw, left, left + sw, LEGEND_INK)
+        _fill(rgb, top + 1, top + sw - 1, left + 1, left + sw - 1, LEGEND_COLORS[b])
+        _draw_text(rgb, name, size, top + (sw - f.get_height()) // 2,
+                   left + sw + 8, LEGEND_INK)
+    return rgb
+
+
+BORDER = np.array([38.0, 36.0, 32.0])
+BORDER_A = 0.42     # a line to follow, not a wall
+
+
+def biome_edges(w):
+    """Cells with a different land biome next door: the internal borders.
+
+    Only where both sides are land. Against the sea the biome changes at every
+    coastal cell, and outlining that draws a dark line round every continent -
+    which the sea ramp already does, better. Water is cut back out because a
+    border laid across a river reads as something built there.
+    """
+    edge = np.zeros(w.biome.shape, bool)
+    for dy, dx in grid.NEIGH4:
+        edge |= (grid.shift(w.biome, dy, dx) != w.biome) & grid.shift(w.land, dy, dx)
+    return edge & w.land & ~(w.rivers | w.lakes)
+
+
+def legend_biome_map(w):
+    """One colour per biome, bordered, with a key to read them by.
+
+    Flat colour and no softening, unlike the `biomes` layer: there the colours
+    are blurred so no band boundary reads as a stencil edge, but here a cell has
+    to be the same colour as the swatch in the corner or the key is a lie. The
+    hillshade is what keeps it from looking like a chart - light enough that a
+    range shows through without pulling any biome towards its neighbour.
+    """
+    rgb = np.where(w.land[..., None], LEGEND_COLORS[w.biome] *
+                   (0.86 + 0.24 * hillshade(w.height)[..., None]),
+                   hypsometric(w.height))
+    rgb = overpaint_water(rgb, w)
+    a = (biome_edges(w) * BORDER_A)[..., None]
+    rgb = np.clip(rgb * (1 - a) + BORDER * a, 0, 255)
+    return draw_legend(rgb, present_biomes(w), w.land).astype(np.uint8)
 
 
 TEMP_RAMP = [(-30.0, (78, 96, 168)), (-10.0, (120, 168, 208)),
@@ -428,6 +584,10 @@ LAYERS = [
     # reaching for and only one can have it: drainage is a layer you open to
     # find out why a river went where it did, and this one is the world.
     ("trees", tree_map),
+    # First of the ones past the number keys, which are all spoken for: this is
+    # the biomes layer with the answer beside it, so anyone who wants it is
+    # already one bracket away on the layer it belongs next to.
+    ("biome legend", legend_biome_map),
     ("drainage", lambda w: flow(w.flow, w.height, w.cfg.river_threshold * w.height.size)),
     ("erosion delta", lambda w: erosion_diff(w.height_pre, w.height_eroded)),
     ("slope", lambda w: slope_map(w.height)),

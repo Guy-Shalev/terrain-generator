@@ -10,7 +10,7 @@ Eight bits is not enough for the terrain. The map spans a couple of height units
 and 256 codes across that is a step of ~8 mm at the scale the lapse rate
 implies - fine on a cliff, and visible as terracing on every plain and shelf,
 which is exactly where a heightmap is looked at flat. Class indices are 8-bit
-because they are labels: there are thirteen biomes and nothing between them.
+because they are labels: there are twelve biomes and nothing between them.
 
 Written by hand rather than through an imaging library. A greyscale PNG with no
 interlacing and no per-row filtering is a signature, three chunks and a zlib

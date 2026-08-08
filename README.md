@@ -58,7 +58,17 @@ and biome under the cursor.
 
 Layers: main view, elevation without water, tectonic relief (pre-texture),
 pre-erosion, plates, boundary classes, stress, rainfall, temperature, biomes,
-trees, drainage, erosion delta, slope, land/coast, river width, canopy.
+trees, biome legend, drainage, erosion delta, slope, land/coast, river width,
+canopy.
+
+`biome legend` is the same classification drawn to be read rather than to sit
+under a relief: one distinct colour per biome from `LEGEND_COLORS`, flat and
+unsoftened so a cell matches its swatch exactly, internal borders where two
+land biomes meet, and a key naming every biome the world actually has. Borders
+skip the coast - the biome changes at every coastal cell and the sea ramp
+already draws that line better - and skip rivers and lakes, where a border
+reads as something built there. The key goes in whichever corner has the least
+land under it.
 
 Seven sliders top right. World: plate count (4-48), size (192-1024 wide, 4:3),
 `land_fraction` as a percent, `margin_h` (0.00-0.40). Water: river count, lake
@@ -154,17 +164,23 @@ temperature twice — flat rate to feed the rain, runoff-aware to feed the biome
 Biomes come from temperature against **rain relative to heat**:
 `precip_mean_mm * runoff` over potential evapotranspiration, read off
 biotemperature sampled twelve times around `swing`. That division is what
-separates a cold desert from tundra. Permanent ice (<0) and the tree line (<6)
+separates a desert from tundra. Permanent ice (<0) and the tree line (<6)
 are checked first, on the warmest month; then five moisture bands against six
 temperature bands:
 
 |  | polar | subpolar | cool | temperate | subtropical | tropical |
 |---|---|---|---|---|---|---|
-| **arid** | cold desert | cold desert | cold desert | cold desert | hot desert | hot desert |
+| **arid** | desert | desert | desert | desert | desert | desert |
 | **semiarid** | tundra | tundra | steppe | steppe | shrubland | savanna |
 | **subhumid** | tundra | taiga | taiga | temp. forest | trop. seasonal | trop. seasonal |
 | **humid** | tundra | taiga | temp. forest | temp. forest | temp. forest | trop. rainforest |
 | **perhumid** | tundra | taiga | temp. rainforest | temp. rainforest | trop. rainforest | trop. rainforest |
+
+The arid row is one biome across all six columns. Desert is a rainfall class -
+that row is picked by moisture index alone - and the hot/cold split this used to
+carry drew its line at the mode of the driest ground's own temperature
+distribution, so cells half a degree apart came out as two biomes with two names
+and two colours. Nothing downstream ever read the difference.
 
 Both sets of cuts are shifted off textbook values because this generator's
 climate is narrower than Earth's; the resulting biome shares land within a few
@@ -192,7 +208,7 @@ so it cannot move the river meanders on existing seeds.
 
 Two outputs: a continuous `cover` field (canopy fraction per cell, what an
 engine scatters from) and a point set (what makes a forest look like trees).
-Four continuous terms, none derivable from the thirteen-way biome cut:
+Four continuous terms, none derivable from the twelve-way biome cut:
 
 - **Moisture** sets it, off `climate.moisture_index`, smoothstepped between
   `tree_mi_open` and `tree_mi_closed`, straddling the semiarid/subhumid cut.
