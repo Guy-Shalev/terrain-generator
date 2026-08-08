@@ -264,10 +264,12 @@ class Config:
     # cell. Wider than `biome_soften` because this is ecology rather than
     # anti-aliasing - the belt is a real place, not a soft edge.
     tree_mix: float = 6.0
-    # Opacity of the trees on the *relief* layer, where they are grain over a
+    # Opacity of the trees on the *main view*, where they are grain over a
     # hypsometric ramp that is still doing the talking. The `trees` layer draws
     # them at full strength on ground desaturated to make room; this one cannot
     # do that without ceasing to be a relief map. 0 turns them off there.
+    # Named for the relief rendering (`render.relief`) rather than for the
+    # layer, which is why it kept the name when the layer changed its own.
     tree_relief: float = 0.55
 
 

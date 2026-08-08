@@ -87,7 +87,7 @@ roughly 0.4 s at 256x192, 2.4 s at 512x384, 7 s at 768x576 and 18 s at 1024x768.
 `generate(..., on_stage=fn)` reports each stage as it starts, which is what the
 viewer paints on the banner while it works.
 
-Layers: relief, elevation without water, tectonic relief (pre-texture),
+Layers: main view, elevation without water, tectonic relief (pre-texture),
 pre-erosion, plates, boundary classes, stress, rainfall, temperature, biomes,
 trees, drainage, erosion delta, slope, land/coast, river width, canopy. The
 rainfall layer is ranked within the land distribution rather than scaled by it -
@@ -478,7 +478,7 @@ transition inland is a gradient while the coast stays exactly as sharp as the
 sea ramp draws it. Nothing but the renderer reads it.
 
 Two layers draw it - `temperature`, absolute so that freezing sits at a fixed
-place on the ramp, and `biomes` - and the main relief layer mixes the biome
+place on the ramp, and `biomes` - and the main view mixes the biome
 colour into its hypsometric tint at `biome_tint`, so height and vegetation read
 off the same map. The trees go on over that at `tree_relief`; see below.
 
@@ -593,7 +593,7 @@ is the belt doing its job rather than mixing everything into an even scatter -
 after positions and sizes, so adding it left both exactly where they were on
 every existing seed.
 
-The relief layer draws them too, at `tree_relief` rather than full opacity.
+The main view draws them too, at `tree_relief` rather than full opacity.
 There they are texture and not the subject: the biome tint has already said
 where forest is, and what the stamps add is grain over it - a canopy that looks
 like canopy, an edge where it thins, and the gallery strips picking out rivers
@@ -850,7 +850,7 @@ ones.
 `world.water` holds it all: `lake_id`, `lake_level`, `lake_depth`, `width`,
 `polylines`, `widths`, plus `flow` and `receivers`. `world.surface` returns the water
 surface where there is water and the bed everywhere else, which is what the
-relief layer hillshades so lakes come out flat.
+main view hillshades so lakes come out flat.
 
 ## Getting a world out
 

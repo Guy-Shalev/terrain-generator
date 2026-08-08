@@ -109,7 +109,7 @@ def overpaint_water(rgb, w):
 
 
 def water_map(w, shade=True):
-    """The main map: relief with lakes at their own flat level and rivers by width.
+    """The main view: relief with lakes at their own flat level and rivers by width.
 
     Lakes are shaded from the water surface, not the bed, so they read as flat
     sheets; the depth ramp underneath still shows how deep the basin is.
@@ -208,8 +208,8 @@ def rain_map(w):
 
 
 # Indexed by `climate` biome id. Kept muted and in the same family as
-# `LAND_RAMP`, because these get mixed into the relief layer rather than
-# replacing it: a saturated palette here turns the main map into a political
+# `LAND_RAMP`, because these get mixed into the main view rather than
+# replacing it: a saturated palette here turns that layer into a political
 # map. Ocean is never drawn from this - the sea ramp handles it.
 BIOME_COLORS = np.array([
     (37, 86, 134),      # ocean, only ever a placeholder
@@ -252,7 +252,7 @@ def biome_rgb(w, soften=None):
 def biome_map(w):
     """Flat biome colour, hillshaded, with the water drawn back over it."""
     rgb = biome_rgb(w)
-    # Shallower than the relief layer's shading. The point here is the biome
+    # Shallower than the main view's shading. The point here is the biome
     # boundaries, and at full contrast a mountain's own shadow reads as one.
     rgb = np.where(w.land[..., None], rgb * (0.78 + 0.38 * hillshade(w.height)[..., None]),
                    hypsometric(w.height))
@@ -313,7 +313,7 @@ def _splat(shape, ys, xs, offsets, weights):
 def paint_trees(rgb, t, shape, strength=1.0):
     """Stamp individual trees over whatever the ground was painted with.
 
-    `strength` scales every alpha, crowns and shadow alike, for the relief layer:
+    `strength` scales every alpha, crowns and shadow alike, for the main view:
     there the trees are texture over a hypsometric ramp that is still doing the
     talking, and at full opacity they bury it.
 
@@ -412,7 +412,7 @@ def erosion_diff(pre, post):
 
 
 LAYERS = [
-    ("relief", water_map),
+    ("main view", water_map),
     ("elevation (no water)", lambda w: relief(w.height).astype(np.uint8)),
     ("tectonic relief", lambda w: relief(w.height_raw).astype(np.uint8)),
     ("pre-erosion", lambda w: relief(w.height_pre).astype(np.uint8)),
