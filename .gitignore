@@ -5,3 +5,7 @@ venv/
 
 # generated maps and layer dumps
 out/
+
+# local tooling, not the project
+.claude/
+start.bat
