@@ -222,7 +222,7 @@ def load_config(path):
                      for k, v in d.items() if k in known})
 
 
-def _new_dir(parent, name):
+def new_dir(parent, name):
     """`name`, or `name-2`, `name-3`... - the first one that does not exist yet.
 
     `mkdir` without `exist_ok` *is* the check, and that is the point: asking
@@ -240,13 +240,17 @@ def _new_dir(parent, name):
             continue
 
 
-def bundle(world, parent="out/export"):
+def bundle(world, parent="out/export", d=None):
     """Everything an engine needs, in a folder of its own. Returns that folder.
 
     A new one every call - `seed7`, then `seed7-2` - because an export is a
     thing you keep, and the reason to press the key twice is usually that the
     second world is worth comparing to the first. Overwriting is the one
     behaviour that cannot be undone from the outside.
+
+    Pass `d` to write into a folder the caller already made, when the export is
+    not the only thing going in it. Then the caller owns the no-overwrite rule,
+    since it is the one that named the folder.
 
     The files inside are plainly named, since the folder carries the seed.
 
@@ -256,7 +260,7 @@ def bundle(world, parent="out/export"):
     the water, and it is a depth either way - it needs no common zero with
     anything, only its own.
     """
-    d = _new_dir(parent, f"seed{world.cfg.seed}")
+    d = Path(d) if d is not None else new_dir(parent, f"seed{world.cfg.seed}")
     heightmap(world.height, d / "height16.png")
     heightmap(world.water.lake_depth, d / "lakes16.png")
     indexmap(world.biome, d / "biome.png", climate.BIOME_NAMES)

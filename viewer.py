@@ -52,8 +52,8 @@ HELP = [
     "R                           regenerate, new seed",
     "T                           regenerate, same seed",
     "G                           toggle plate motion arrows",
-    "P                           save the current layer to out/",
-    "E                           export the world to out/export/",
+    "P                           save the current layer to out/export/",
+    "E                           export the world for an engine, same folder",
     "F1                          this help",
     "ESC                         quit",
 ]
@@ -123,6 +123,7 @@ class Viewer:
         self.busy = ""
         self.world = None
         self.surfaces = {}
+        self.dir = None
         self.zoom = 1.0
         self.cam = [0.0, 0.0]  # top-left of the view, in map cells
         self.sliders = [
@@ -155,6 +156,7 @@ class Viewer:
         progress("starting")
         self.world = generate(self.cfg, on_stage=progress)
         self.surfaces = {}
+        self.dir = None      # a new world is a new folder, not an overwrite
         self.busy = ""
         self.fit()
 
@@ -402,18 +404,39 @@ class Viewer:
             pygame.display.flip()
             clock.tick(60)
 
-    def save(self):
-        import os
-        os.makedirs("out", exist_ok=True)
-        name, surf = self.surface(self.layer)
-        path = f"out/seed{self.cfg.seed}_{name.replace(' ', '_').replace('/', '-')}.png"
-        pygame.image.save(surf, path)
-        self.busy = f"saved {path}"
+    # ---- getting a world out ----------------------------------------
+    def folder(self):
+        """Where this world's files go: one folder, made on the first save.
+
+        Per world and not per keypress, so a layer picture and the engine data
+        land together - looking at a map and handing it over are the same
+        errand, and they were two folders apart. `regenerate` drops it, so the
+        next world gets `seed7-2` rather than writing over what is already
+        there.
+
+        Made lazily. Pressing neither key should not litter `out/export/` with
+        an empty directory per world looked at.
+        """
+        if self.dir is None:
+            self.dir = export.new_dir("out/export", f"seed{self.cfg.seed}")
+        return self.dir
+
+    def save(self, i=None):
+        """One layer as it is drawn, full map - pan and zoom are for looking."""
+        name, surf = self.surface(self.layer if i is None else i)
+        path = self.folder() / f"{name.replace(' ', '_').replace('/', '-')}.png"
+        pygame.image.save(surf, str(path))
+        self.busy = f"saved {path.as_posix()}"
+        return path
 
     def export(self):
-        """The whole world, not the view: pan and zoom are for looking at it."""
-        # A fresh folder each press, never an overwrite; `bundle` picks the name.
-        self.busy = f"exported to {export.bundle(self.world).as_posix()}/"
+        """The engine data, and the main view beside it to say which world."""
+        d = self.folder()
+        export.bundle(self.world, d=d)
+        # Colour, so `bundle` cannot write it: the PNG writer in there is
+        # greyscale, and pygame is the viewer's dependency, not the generator's.
+        self.save(0)
+        self.busy = f"exported to {d.as_posix()}/"
 
 
 def main(argv=None):

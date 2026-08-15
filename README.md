@@ -52,7 +52,11 @@ before use (`plate_warp`, `crust_warp`, `age_warp`).
 Left-drag or WASD/arrows to pan, wheel to zoom, `Z` to fit. Number keys pick a
 layer, `[` `]` cycle. `R` regenerates with a new seed, `T` with the same one,
 `G` overlays plate motion arrows, `P` saves the current layer, `E` exports the
-world for an engine, `F1` toggles help. The status bar reads out elevation,
+world for an engine, `F1` toggles help. `P` and `E` write to the same folder —
+one per world under `out/export/`, made on the first press of either — so the
+pictures and the data of a world stay together. `E` also saves the main view, to
+say which world the folder holds. Regenerating starts a new folder, so nothing
+is written over. The status bar reads out elevation,
 plate, crust type, distance to the nearest boundary, drainage area, temperature
 and biome under the cursor.
 
@@ -286,7 +290,9 @@ bed is still cut to the shore.
 ## Getting a world out
 
 `terrain/export.py` writes six files, into a new folder per export under
-`out/export/` (`seed7`, then `seed7-2` — an export is a thing you keep):
+`out/export/` (`seed7`, then `seed7-2` — an export is a thing you keep). Pass
+`d=` to write into a folder you made yourself; the viewer does, so its layer
+PNGs land beside the data:
 
 | file | what it is |
 |---|---|
