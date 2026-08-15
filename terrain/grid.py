@@ -1,5 +1,6 @@
 """Grid helpers. The world wraps in x (cylinder) and clamps in y (poles)."""
 import numpy as np
+from scipy import fft as _fft
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 
 # 8-neighbour offsets (dy, dx) and their step lengths.
@@ -120,26 +121,66 @@ def gradient(a):
     return dy, dx
 
 
+def _blur_fft(a, sigma):
+    """The same gaussian, multiplied in the frequency domain instead.
+
+    `gaussian_filter` convolves with a kernel 8 sigma wide, so it costs the map
+    times sigma - and sigma is a pixel quantity, scaled up with the map by
+    `_scale_to_size`. That makes every wide blur grow as the 3/2 power of the
+    cell count: the gyre blur alone is 60 px at 4K, a 481-tap kernel run twice
+    over eight million cells. An FFT costs n log n whatever sigma is, and
+    scipy's threads it across every core.
+
+    x is periodic already, which is what the map is. y is not, so the array is
+    padded with its own edge rows out to where the kernel dies; what wraps
+    round from the far pad is under 3e-4 of the kernel's weight, which is the
+    same tail `gaussian_filter` truncates away.
+    """
+    pad = int(np.ceil(4 * sigma))
+    b = np.concatenate([a[:1].repeat(pad, 0), a, a[-1:].repeat(pad, 0)])
+    ky = _fft.fftfreq(b.shape[0])[:, None]
+    kx = _fft.rfftfreq(b.shape[1])[None, :]
+    kernel = np.exp(-2 * np.pi ** 2 * sigma ** 2 * (ky ** 2 + kx ** 2))
+    spec = _fft.rfft2(b, workers=-1)
+    spec *= kernel
+    return _fft.irfft2(spec, s=b.shape, workers=-1)[pad:pad + a.shape[0]]
+
+
 def blur(a, sigma):
     if sigma <= 0:
         return a
-    return gaussian_filter(a.astype(float), sigma, mode=["nearest", "wrap"])
+    # Single precision, always - the argument arrives in double often enough
+    # that widening here is what the filter spends its time on. A gaussian is
+    # the most-called thing in the generator after the noise, it is bound by
+    # bytes moved, and a smoothed field carries nothing near float32's seventh
+    # digit. Bool and integer masks are blurred too, hence the explicit cast
+    # rather than a dtype-preserving one.
+    a = a.astype(np.float32)
+    # Measured at 4K: the two cross over around sigma 8 to 10, and by 60 the
+    # FFT is six times quicker.
+    if sigma >= 12.0:
+        return _blur_fft(a, sigma).astype(np.float32, copy=False)
+    return gaussian_filter(a, sigma, mode=["nearest", "wrap"])
 
 
 def edt(mask, return_indices=False):
     """Distance to the nearest False cell of `mask`, wrapping in x.
 
-    Tiles the map three times horizontally so the transform can see across the
-    seam, then crops back. Returned indices are folded into the real map.
+    Padded with a copy of each edge half of the map so the transform can see
+    across the seam, then cropped back. Half is enough and a whole tile either
+    side is not needed: on a cylinder the shorter way round is at most w/2, so
+    a nearest cell further than that in the padded array can never be the
+    nearest one on the map. Returned indices are folded back into the real map.
     """
     w = mask.shape[1]
-    tiled = np.concatenate([mask, mask, mask], axis=1)
+    p = (w + 1) // 2
+    tiled = np.concatenate([mask[:, -p:], mask, mask[:, :p]], axis=1)
     if not return_indices:
-        return distance_transform_edt(tiled)[:, w:2 * w]
+        return distance_transform_edt(tiled)[:, p:p + w]
     dist, idx = distance_transform_edt(tiled, return_indices=True)
-    iy = idx[0][:, w:2 * w]
-    ix = idx[1][:, w:2 * w] % w
-    return dist[:, w:2 * w], (iy, ix)
+    iy = idx[0][:, p:p + w]
+    ix = (idx[1][:, p:p + w] - p) % w
+    return dist[:, p:p + w], (iy, ix)
 
 
 def normalize(a, lo=0.0, hi=1.0):

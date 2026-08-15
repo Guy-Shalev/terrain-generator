@@ -36,7 +36,10 @@ def test_fill_and_flow():
     h = -np.hypot(*np.mgrid[-16:16, -16:16]) * 0.05 + rng.normal(0, 0.01, (32, 32))
     h[16, 16] = -0.3  # a pit near the summit that must be filled
     filled = hydrology.fill_depressions(h, sea_level=-9.0)
-    assert (filled >= h - 1e-9).all(), "filling may only raise the surface"
+    # 1e-6 covers the single-precision surface the fill returns against the
+    # double-precision one handed to it; the pipeline itself is float32 on both
+    # sides of this call, so there the guarantee is exact.
+    assert (filled >= h - 1e-6).all(), "filling may only raise the surface"
     assert filled[16, 16] > h[16, 16], "pit was not filled"
     rec, rec_d, _ = hydrology.flow_routing(filled)
     acc = hydrology.accumulate(filled, rec)
@@ -395,7 +398,9 @@ def test_currents_tell_the_two_coasts_apart():
     cfg = Config(width=384, height=288, ref_width=384)
     a = climate.currents(h, cfg)
     sea = h <= 0
-    assert abs(float(a[sea].mean())) < 1e-9, "currents must move heat, not add it"
+    # 1e-6, not 0: the field is single precision, so what is left after the mean
+    # is subtracted is rounding on a quantity of order half a degree.
+    assert abs(float(a[sea].mean())) < 1e-6, "currents must move heat, not add it"
     assert not a[~sea].any(), "the anomaly is the sea's, not the land's"
 
     lat = np.abs(grid.latitude(h.shape))[:, 0]

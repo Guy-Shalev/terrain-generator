@@ -14,7 +14,14 @@ def perlin(h, w, py, px, rng):
     # Kept as two scalar fields rather than one array of 2-vectors: gathering
     # the stacked form builds an (h, w, 2) temporary and then reads it with a
     # stride of two, which is the slowest part of the whole noise stack.
-    gy, gx = np.sin(ang), np.cos(ang)
+    #
+    # Single precision from here on. The gathers below write a full map each,
+    # four of them per octave and six octaves per fBm, so this is the second
+    # most expensive thing the generator does and it is bound by how many bytes
+    # move rather than by the arithmetic. A gradient is a sine: seven digits is
+    # six more than the field needs, and float32 propagates on into every
+    # elevation and climate field built out of it.
+    gy, gx = np.sin(ang, dtype=np.float32), np.cos(ang, dtype=np.float32)
     gy[:, -1] = gy[:, 0]  # seam
     gx[:, -1] = gx[:, 0]
     ys = np.linspace(0, py, h, endpoint=False)
@@ -48,7 +55,7 @@ def perlin(h, w, py, px, rng):
 
 def fbm(h, w, rng, periods=4, octaves=6, gain=0.5, ridged=False):
     """Fractal sum of perlin octaves. Ridged variant gives sharp crests."""
-    total = np.zeros((h, w))
+    total = np.zeros((h, w), np.float32)
     amp, norm, p = 1.0, 0.0, float(periods)
     aspect = h / w
     for _ in range(octaves):

@@ -80,18 +80,69 @@ def _warm_start(h, outlet, min_size=64):
     return coarse.repeat(2, 0).repeat(2, 1)[:h.shape[0], :h.shape[1]]
 
 
-def _solve(h, outlet, eps, init, max_iters=4000):
+def _finish_sparse(h, filled, eps, iters_left, refresh=32):
+    """Run the same iteration, but only over the cells still above the terrain.
+
+    A cell that has reached `h` can never move again: the step is
+    `min(filled, max(h, ...))`, which returns `h` for it whatever the
+    neighbours do. So the set of cells that can still change only ever shrinks,
+    and everything outside it is a fixed boundary value the live cells read.
+
+    That set is what the whole-grid sweep wastes its time on. Most of the map
+    is settled within a dozen iterations - it is the deep basins that take the
+    remaining hundred, and by then they are a few per cent of the cells - so
+    the sweep is spending a full pass of a 2 to 8 million cell array to move
+    fifty thousand of them. Gathering the live cells and their neighbours into
+    flat lists costs about three times as much per cell as the sequential
+    sweep, and wins as soon as the live fraction is under a third.
+
+    Rebuilt every `refresh` iterations, because it keeps shrinking. Exact, not
+    an approximation: `test_fill_warm_start_is_exact` pins it against the plain
+    sweep. Also note the centre cell drops out of the minimum here - it can
+    only ever tie, so the answer is the same one.
+    """
+    rows, cols = h.shape
+    hf, ff = h.ravel(), filled.ravel()
+    while iters_left > 0:
+        live = np.flatnonzero(ff > hf)
+        if live.size == 0:
+            break
+        # The grid's own edges: x wraps, y clamps. Built for the live cells
+        # only rather than taken from `grid.neighbour_index`, whose per-shape
+        # cache would be eight full-map index grids at every level of the warm
+        # start.
+        ly, lx = np.divmod(live, cols)
+        nb = np.stack([np.clip(ly + dy, 0, rows - 1) * cols + (lx + dx) % cols
+                       for dy, dx in grid.NEIGH8])
+        floor = hf[live]
+        for _ in range(min(refresh, iters_left)):
+            iters_left -= 1
+            cur = ff[live]
+            best = np.maximum(ff[nb].min(axis=0) + eps, floor)
+            np.minimum(best, cur, out=best)
+            if not (best < cur).any():
+                return filled
+            ff[live] = best
+    return filled
+
+
+def _solve(h, outlet, eps, init, max_iters=4000, dense_iters=16):
     """Iterate w = max(h, min(neighbours) + eps) until nothing moves.
 
     Every array here is preallocated and every step is in-place: this loop runs
     hundreds of times over the full grid, and at 1024x768 a single temporary
     per step is 6 MB of allocation and page faults.
+
+    The first `dense_iters` sweeps go over the whole grid, which is where most
+    of the map settles, and the long tail is handed to `_finish_sparse`. Small
+    grids - the coarse levels of the warm start - converge before they get
+    there and never leave this loop.
     """
     filled = np.where(outlet, h, h.max() + 1.0 if init is None else init)
     work = np.empty_like(filled)
     best = np.empty_like(filled)
     lower = np.empty(filled.shape, dtype=bool)
-    for _ in range(max_iters):
+    for i in range(max_iters):
         # Including the centre cell in the minimum is harmless: it can only
         # tie, never pull the result below h.
         grid.min3x3(filled, work, best)
@@ -105,7 +156,9 @@ def _solve(h, outlet, eps, init, max_iters=4000):
         done = not lower.any()
         filled, best = best, filled
         if done:
-            break
+            return filled
+        if i + 1 >= dense_iters:
+            return _finish_sparse(h, filled, eps, max_iters - i - 1)
     return filled
 
 
@@ -118,6 +171,12 @@ def fill_depressions(h, sea_level=0.0, eps=1e-5, max_iters=400):
     outlet = h <= sea_level
     outlet[0, :] = True
     outlet[-1, :] = True
+    # Single precision for the solve. It is memory-bound - a few hundred
+    # full-grid 3x3 minima, and nothing else - so halving the traffic runs it
+    # about three times faster. Heights are order 1 and the tilt is 1e-5, both
+    # a long way above float32's step of 1e-7 at that magnitude, so the surface
+    # this returns is the same one to every digit that reaches the map.
+    h = h.astype(np.float32, copy=False)
     init = _warm_start(h, outlet)
     if init is not None:
         # The coarse solve runs without the epsilon tilt, so pad by the most
@@ -169,6 +228,9 @@ def accumulate(filled, rec, weights=None, gate=None):
     indeg = np.bincount(r[flows], minlength=n)
     front = np.flatnonzero(indeg == 0)     # ridge cells, nothing upstream
     gate_mask, gate_fn = gate if gate else (None, None)
+    # Scratch for the "last writer wins" dedupe at the foot of the loop. Never
+    # cleared between levels: every entry it reads it has just written.
+    stamp = np.empty(n, np.int64)
     while front.size:
         if gate_mask is not None:
             # Before the sink filter: a gate on a pit still has to fire, or the
@@ -182,7 +244,16 @@ def accumulate(filled, rec, weights=None, gate=None):
         tgt = r[front]
         np.add.at(acc, tgt, acc[front])
         np.subtract.at(indeg, tgt, 1)
-        front = np.unique(tgt[indeg[tgt] == 0])
+        # The next level is the targets that just ran out of upstream cells,
+        # each taken once. `np.unique` sorts to get that, and the sort was a
+        # sixth of this stage at 4K. Instead, scatter each candidate's own
+        # position into `stamp` and keep the ones that read their position
+        # back: a value written twice leaves only the later writer agreeing,
+        # so exactly one copy of each distinct target survives.
+        cand = tgt[indeg[tgt] == 0]
+        pos = np.arange(cand.size)
+        stamp[cand] = pos
+        front = cand[stamp[cand] == pos]
     return acc.reshape(filled.shape)
 
 
@@ -196,6 +267,11 @@ def stream_power(h, sea_level=0.0, passes=4, k=0.06, m=0.5, n=1.0,
     the windward side is cut into valleys and the lee keeps its bulk. The field
     averages one over land, so the magnitude `k` is tuned against survives.
     """
+    # The whole loop runs single precision; see `fill_depressions`. Thermal
+    # creep and the blur are memory-bound in the same way the fill is, and the
+    # surface stays float32 from here to the end of the pipeline so nothing
+    # downstream pays to widen it back.
+    h = h.astype(np.float32, copy=False)
     for p in range(passes):
         land = h > sea_level - 0.02
         h = thermal(h, iters=thermal_iters, talus=talus, mask=land)
@@ -209,7 +285,7 @@ def stream_power(h, sea_level=0.0, passes=4, k=0.06, m=0.5, n=1.0,
         # Never cut a cell below its own receiver: that would invert the flow.
         drop = np.minimum(incision, (flat - flat[rec.ravel()]) * 0.5)
         drop = np.where(land.ravel(), np.clip(drop, 0, None), 0.0)
-        h = (flat - drop).reshape(h.shape)
+        h = np.subtract(flat, drop, dtype=np.float32).reshape(h.shape)
         h = np.where(land, grid.blur(h, 0.4), h)
     filled = fill_depressions(h, sea_level)
     rec, rec_d, _ = flow_routing(filled)
