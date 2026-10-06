@@ -206,13 +206,14 @@ class Viewer:
     def fit(self):
         sw, sh = self.screen.get_size()
         mh, mw = self.world.height.shape
-        self.zoom = min(sw / mw, (sh - 28) / mh)
-        self.cam = [(mw - sw / self.zoom) / 2, (mh - (sh - 28) / self.zoom) / 2]
+        # The map sits between the menu bar and the info bar, 28px each.
+        self.zoom = min(sw / mw, (sh - 56) / mh)
+        self.cam = [(mw - sw / self.zoom) / 2, (mh - (sh - 56) / self.zoom) / 2]
 
     def clamp(self):
         sw, sh = self.screen.get_size()
         mh, mw = self.world.height.shape
-        vw, vh = sw / self.zoom, (sh - 28) / self.zoom
+        vw, vh = sw / self.zoom, (sh - 56) / self.zoom
         self.cam[0] %= mw                      # x wraps with the world
         self.cam[1] = min(max(self.cam[1], min(0, mh - vh)), max(0, mh - vh))
 
@@ -381,6 +382,9 @@ class Viewer:
         x += self.text(f"[{self.layer + 1}] {name}", x, 4, (255, 226, 150), self.big) + 22
         x += self.text(f"seed {self.cfg.seed}  {self.cfg.width}x{self.cfg.height}"
                        f"  zoom {self.zoom:.2f}x", x, 6) + 22
+        # What is under the mouse gets its own bar along the bottom.
+        sh = self.screen.get_height()
+        pygame.draw.rect(self.screen, (26, 28, 34), (0, sh - 28, self.screen.get_width(), 28))
         if self.world is not None:
             mx, my = self.screen_to_map(pygame.mouse.get_pos())
             mh, mw = self.world.height.shape
@@ -396,10 +400,10 @@ class Viewer:
                 self.text(f"h {d['elev']:+.3f}  plate {d['plate']:>2} {d['crust'][:4]}"
                           f"  bnd {d['dist_to_boundary']:.0f}px  rain {d['rain']:.2f}"
                           f"  {d['temp']:+.0f}C  flow {d['flow']:.0f}{extra}",
-                          x, 6, (170, 210, 255))
-        # Bottom left, where no menu drops down over it mid-rebuild.
+                          12, sh - 22, (170, 210, 255))
+        # Bottom left above that bar, where no menu drops down over it mid-rebuild.
         if self.busy:
-            self.text(self.busy, 12, self.screen.get_height() - 32, (255, 200, 120), self.big)
+            self.text(self.busy, 12, sh - 60, (255, 200, 120), self.big)
         self.draw_menu()
 
     # ---- main loop --------------------------------------------------
