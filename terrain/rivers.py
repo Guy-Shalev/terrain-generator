@@ -433,7 +433,13 @@ def _disc(width_map, y, x, chan_w):
         return
     sel = np.hypot((ys - y)[:, None], (xs - x)[None, :]) <= r
     if not sel.any():
-        return
+        # A point at exactly half a cell in *both* axes is 0.707 from all four
+        # of its neighbours, so the narrowest channels - anything under a cell
+        # wide, which floors `r` at 0.5 - paint nothing at all there and the
+        # line comes out with a hole in it. Rare on a D8 course, which starts on
+        # cell centres; unmissable on a smoothed one, where averaging integers
+        # lands on halves all the time. Take the nearest cell instead of none.
+        sel[np.argmin(np.abs(ys - y)), np.argmin(np.abs(xs - x))] = True
     yy, xx = np.nonzero(sel)
     np.maximum.at(width_map, (ys[yy], xs[xx] % w), chan_w)
 
