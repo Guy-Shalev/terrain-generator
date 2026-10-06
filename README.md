@@ -17,10 +17,8 @@ pip install numpy scipy pygame
 
 ## Run
 
-Run `start.bat`, or:
-
 ```bash
-python viewer.py --seed 7 --size 640x448
+python main.py --seed 7 --size 640x448
 ```
 
 ```bash
@@ -133,13 +131,3 @@ The reasons behind each stage are in its module's docstrings.
 
 About 3 s at 640x448, 12-14 s at 1024x768, 27-43 s at 1920x1080 and a little
 over two minutes at 3840x2160. Times vary from run to run.
-
-## Not done yet
-
-- Nothing human-made: no towns, roads or borders.
-- Climate is a yearly mean plus a seasonal swing. That is enough for Whittaker
-  biomes, not for Köppen, which needs to know when the rain falls.
-- Ocean currents warm or cool the sea, not the land beside it.
-- Lake outflow is carved, not simulated, so a river cannot change course later.
-- Meanders are noise, not migration.
-- Trees do not slow erosion.

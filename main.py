@@ -1,6 +1,6 @@
 """Pygame viewer: pan, zoom, layer switching, regeneration.
 
-    python viewer.py [--seed N] [--size WxH] [--windowed WxH]
+    python main.py [--seed N] [--size WxH] [--windowed WxH]
 
 Everything is in the menu bar, each entry with its shortcut key beside it.
 """
