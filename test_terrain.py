@@ -897,6 +897,10 @@ def test_trees_grow_where_they_should():
     assert w.land[ys, xs].all(), "a tree was placed in the water"
     assert (t.cover[ys, xs] > 0).all(), "a tree was placed on bare cover"
     assert set(np.unique(t.kind)) <= set(range(len(trees.KIND_NAMES)))
+    # One kind per biome id. A stale row indexes without error and shifts every
+    # biome after it onto its neighbour's trees.
+    assert len(trees.KIND_BY_BIOME) == len(climate.BIOME_NAMES)
+    assert trees.KIND_BY_BIOME[climate.TROPICAL_RAINFOREST] == trees.BROADLEAF
 
     # The moisture axis has to come through: closed-canopy biomes must carry
     # more of it than the dry ones, or the field is noise with a mask on it.

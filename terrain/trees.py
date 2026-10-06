@@ -13,7 +13,7 @@ intermediate; the points are the product. Same move `rivers` already makes by
 keeping polylines: a scatter is positions, and rasterising it is the lossy step.
 
 Nothing here is derivable from `biome.png` alone, and that is the point of the
-`cover` field being continuous. The biome grid is a thirteen-way cut - a cell is
+`cover` field being continuous. The biome grid is a twelve-way cut - a cell is
 temperate forest or it is steppe - and every clearing, timberline and gallery
 strip in the world lives in the ground between those two answers.
 """
@@ -32,20 +32,19 @@ KIND_NAMES = ["conifer", "broadleaf", "palm", "scrub"]
 # model - a look-up, because the climate that would decide it has already been
 # run and banded, and re-deriving leaf habit from temperature would be the same
 # cut drawn twice. Temperate rainforest is coniferous on purpose: the real ones
-# are, from Sitka to Valdivia. Hot desert gets palms because the only trees a
-# desert has stand where the water is, and the gallery term is what puts them
-# there.
+# are, from Sitka to Valdivia. One row per biome id, in id order: a row left
+# over when `climate` merged its two deserts shifted every biome after it by
+# one and grew tropical rainforest as palms.
 KIND_BY_BIOME = np.array([
     SCRUB,      # ocean - never drawn, cover is zero there
     SCRUB,      # ice
     SCRUB,      # tundra
     CONIFER,    # taiga
-    SCRUB,      # cold desert
+    SCRUB,      # desert
     SCRUB,      # steppe
     BROADLEAF,  # temperate forest
     CONIFER,    # temperate rainforest
     SCRUB,      # shrubland
-    PALM,       # hot desert
     PALM,       # savanna - flat-crowned, an acacia read at three pixels
     PALM,       # tropical seasonal forest
     BROADLEAF,  # tropical rainforest
@@ -112,7 +111,7 @@ def canopy(world, cfg, rng):
 def kind_mix(biome, land, cfg):
     """Probability of each kind per cell, as a blurred local composition.
 
-    `KIND_BY_BIOME` on its own is a stencil: it reads a thirteen-way cut, so
+    `KIND_BY_BIOME` on its own is a stencil: it reads a twelve-way cut, so
     every tree inside the taiga comes out coniferous and every tree a cell
     outside it does not, and the boundary draws as a hard line between two
     species. Real forests do not do that - conifers thin out through a belt of
