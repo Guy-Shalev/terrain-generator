@@ -49,7 +49,7 @@ before use (`plate_warp`, `crust_warp`, `age_warp`).
 
 ## Viewer
 
-A menu bar along the top: File (save, export, quit), Edit (new world, rebuild,
+A menu bar along the top: File (import, save, export, quit), Edit (new world, rebuild,
 the sliders), View (plate arrows, zoom), Layer (every layer), Help (mouse
 controls). Each entry shows its shortcut key; the keys work with the menus shut.
 Esc closes an open menu before it quits.
@@ -61,14 +61,17 @@ world for an engine. `P` and `E` write to the same folder —
 one per world under `out/export/`, made on the first press of either — so the
 pictures and the data of a world stay together. `E` also saves the main view, to
 say which world the folder holds. Regenerating starts a new folder, so nothing
-is written over. The status bar reads out elevation,
+is written over. `I` imports a world: pick an export's `config.json` and the
+world is generated again from its seed and settings, sliders and all. It says
+so when the export was made by other code, since the rebuild may then differ.
+The bar along the bottom reads out elevation,
 plate, crust type, distance to the nearest boundary, drainage area, temperature
 and biome under the cursor.
 
 Layers: main view, elevation without water, tectonic relief (pre-texture),
 pre-erosion, plates, boundary classes, stress, rainfall, temperature, biomes,
-trees, biome legend, drainage, erosion delta, slope, land/coast, river width,
-canopy.
+trees, biome legend, main view coloured by biome, drainage, erosion delta,
+slope, land/coast, river width, canopy.
 
 `biome legend` is the same classification drawn to be read rather than to sit
 under a relief: one distinct colour per biome from `LEGEND_COLORS`, flat and

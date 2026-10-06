@@ -5,7 +5,9 @@
 Everything is in the menu bar, each entry with its shortcut key beside it.
 """
 import argparse
+import warnings
 from collections import namedtuple
+from pathlib import Path
 
 import numpy as np
 import pygame
@@ -43,6 +45,13 @@ def _size_index(cfg):
     or not, so the knob starts on whichever rung is closest by cell count."""
     return min(range(len(SIZES)),
                key=lambda i: abs(SIZES[i][0] * SIZES[i][1] - cfg.width * cfg.height))
+
+
+def _slider_values(cfg):
+    """Where each slider sits for a config, in slider order - `wanted` backwards."""
+    return (cfg.n_plates, _size_index(cfg), round(cfg.land_fraction * 100),
+            round(cfg.margin_h * 100), round(RIVER_SCALE / cfg.river_threshold),
+            round(LAKE_SCALE / cfg.lake_min_depth), round(cfg.temp_offset))
 
 
 # One menu line. `key` is only the hint drawn on the right - the keys
@@ -124,22 +133,23 @@ class Viewer:
         self.dir = None
         self.zoom = 1.0
         self.cam = [0.0, 0.0]  # top-left of the view, in map cells
+        plates, size, land, rough, rivers, lakes, temp = _slider_values(cfg)
         self.sliders = [
-            Slider("plates", 4, 48, cfg.n_plates),
-            Slider("map size", 0, len(SIZES) - 1, _size_index(cfg),
+            Slider("plates", 4, 48, plates),
+            Slider("map size", 0, len(SIZES) - 1, size,
                    fmt=lambda i: "{}x{}".format(*SIZES[i])),
-            Slider("land/sea", 0, 100, round(cfg.land_fraction * 100),
-                   fmt=lambda v: f"{v}/{100 - v}"),
+            Slider("land/sea", 0, 100, land, fmt=lambda v: f"{v}/{100 - v}"),
             # Sliders are integer, so this one carries hundredths.
-            Slider("shelf coast roughness", 0, 40, round(cfg.margin_h * 100),
+            Slider("shelf coast roughness", 0, 40, rough,
                    fmt=lambda v: f"{v / 100:.2f}"),
-            Slider("rivers", 1, 30, round(RIVER_SCALE / cfg.river_threshold)),
-            Slider("lakes", 1, 30, round(LAKE_SCALE / cfg.lake_min_depth)),
-            Slider("temperature", -20, 20, round(cfg.temp_offset),
-                   fmt=lambda v: f"{v:+d}C"),
+            Slider("rivers", 1, 30, rivers),
+            Slider("lakes", 1, 30, lakes),
+            Slider("temperature", -20, 20, temp, fmt=lambda v: f"{v:+d}C"),
         ]
         self.menus = {
             "File": [
+                Item("Import world...", "I", self.import_config),
+                None,
                 Item("Save layer picture", "P", self.save),
                 Item("Export for engine", "E", self.export),
                 None,
@@ -484,6 +494,8 @@ class Viewer:
                         self.save()
                     if e.key == pygame.K_e:
                         self.export()
+                    if e.key == pygame.K_i:
+                        self.import_config()
 
             keys = pygame.key.get_pressed()
             step = 12 / self.zoom
@@ -530,6 +542,40 @@ class Viewer:
         # greyscale, and pygame is the viewer's dependency, not the generator's.
         self.save(0)
         self.busy = f"exported to {d.as_posix()}/"
+
+    def import_config(self):
+        """Rebuild a world from an export's `config.json`.
+
+        The seed and every knob, not the pictures: the world is generated
+        again, so one exported by other code may not come out the same, and
+        `load_config` warns when the code differs.
+        """
+        # tkinter because it ships with Python and Windows draws the dialog.
+        import tkinter
+        from tkinter import filedialog
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)   # or the dialog opens behind the map
+        path = filedialog.askopenfilename(
+            parent=root, title="Import world", initialdir="out/export",
+            filetypes=[("World config", "config.json"), ("JSON", "*.json")])
+        root.destroy()
+        if not path:
+            return
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                cfg = export.load_config(path)
+            except Exception as err:    # any file can be picked; say so, don't crash
+                self.busy = f"could not import {path}: {err}"
+                return
+        self.cfg = cfg
+        # Or the next slider release writes the old world's values back over it.
+        for s, v in zip(self.sliders, _slider_values(cfg)):
+            s.value = int(np.clip(v, s.lo, s.hi))
+        self.regenerate(cfg.seed)
+        self.busy = f"imported {Path(path).parent.name}" + (
+            "  -  made by other code, may not match" if caught else "")
 
 
 def main(argv=None):
