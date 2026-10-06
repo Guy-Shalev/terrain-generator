@@ -2,9 +2,10 @@
 
     python viewer.py [--seed N] [--size WxH] [--windowed WxH]
 
-Controls are listed on screen (F1).
+Everything is in the menu bar, each entry with its shortcut key beside it.
 """
 import argparse
+from collections import namedtuple
 
 import numpy as np
 import pygame
@@ -44,19 +45,12 @@ def _size_index(cfg):
                key=lambda i: abs(SIZES[i][0] * SIZES[i][1] - cfg.width * cfg.height))
 
 
-HELP = [
-    "left drag / arrows / WASD   pan",
-    "sliders (top right)         world, coast, rivers, lakes, climate",
-    "wheel / + -                 zoom      (Z resets)",
-    "1..9, 0, -                  layer     ([ ] cycles all)",
-    "R                           regenerate, new seed",
-    "T                           regenerate, same seed",
-    "G                           toggle plate motion arrows",
-    "P                           save the current layer to out/export/",
-    "E                           export the world for an engine, same folder",
-    "F1                          this help",
-    "ESC                         quit",
-]
+# One menu line. `key` is only the hint drawn on the right - the keys
+# themselves are handled in `Viewer.run`. No action makes it a line to read
+# (the Help menu); `checked` draws a dot beside it while it returns true.
+Item = namedtuple("Item", "label key action checked", defaults=(None, None))
+
+LAYER_KEYS = "1234567890-"   # the first eleven layers; the rest are [ ] away
 
 
 class Slider:
@@ -119,7 +113,11 @@ class Viewer:
         self.cfg = cfg
         self.layer = 0
         self.arrows = False
-        self.show_help = True
+        self.open = None       # title of the open menu
+        self.titles = []       # (rect, title), laid out by draw
+        self.rows = []         # (rect, row) of the open menu, laid out by draw
+        self.panel = pygame.Rect(0, 0, 0, 0)
+        self.rng = np.random.default_rng()
         self.busy = ""
         self.world = None
         self.surfaces = {}
@@ -140,6 +138,39 @@ class Viewer:
             Slider("temperature", -20, 20, round(cfg.temp_offset),
                    fmt=lambda v: f"{v:+d}C"),
         ]
+        self.menus = {
+            "File": [
+                Item("Save layer picture", "P", self.save),
+                Item("Export for engine", "E", self.export),
+                None,
+                Item("Quit", "Esc",
+                     lambda: pygame.event.post(pygame.event.Event(pygame.QUIT))),
+            ],
+            "Edit": [
+                Item("New world", "R", self.new_world),
+                Item("Rebuild, same seed", "T", lambda: self.regenerate(self.cfg.seed)),
+                None,
+                *self.sliders,
+            ],
+            "View": [
+                Item("Plate motion arrows", "G",
+                     lambda: setattr(self, "arrows", not self.arrows), lambda: self.arrows),
+                None,
+                Item("Zoom in", "+", lambda: self.zoom_center(1.25)),
+                Item("Zoom out", "Num -", lambda: self.zoom_center(0.8)),
+                Item("Fit to window", "Z", self.fit),
+            ],
+            "Layer": [
+                Item(name, LAYER_KEYS[i] if i < len(LAYER_KEYS) else "",
+                     lambda i=i: setattr(self, "layer", i), lambda i=i: self.layer == i)
+                for i, (name, _) in enumerate(render.LAYERS)
+            ],
+            "Help": [
+                Item("Pan", "drag / WASD / arrows"),
+                Item("Zoom", "wheel"),
+                Item("Next / previous layer", "] ["),
+            ],
+        }
         self.regenerate(cfg.seed)
 
     # ---- generation -------------------------------------------------
@@ -159,6 +190,9 @@ class Viewer:
         self.dir = None      # a new world is a new folder, not an overwrite
         self.busy = ""
         self.fit()
+
+    def new_world(self):
+        self.regenerate(int(self.rng.integers(0, 10 ** 6)))
 
     def surface(self, i):
         """Layers are rendered on demand and cached; some are not cheap."""
@@ -189,6 +223,9 @@ class Viewer:
         self.cam[0] = mx - sx / self.zoom
         self.cam[1] = my - (sy - 28) / self.zoom
         self.clamp()
+
+    def zoom_center(self, factor):
+        self.zoom_at(factor, (self.screen.get_width() // 2, self.screen.get_height() // 2))
 
     def screen_to_map(self, pos):
         return self.cam[0] + pos[0] / self.zoom, self.cam[1] + (pos[1] - 28) / self.zoom
@@ -231,19 +268,69 @@ class Viewer:
             pygame.draw.line(self.screen, col, a, b, 2)
             pygame.draw.circle(self.screen, col, (int(p), int(q)), 4)
 
-    def draw_sliders(self):
-        # One gutter for all of them, wide enough for the longest label, so the
-        # tracks line up in a column instead of stepping in and out per row.
-        gutter = max(s.gutter(self.font) for s in self.sliders)
-        w = gutter + Slider.TRACK_W + 24
-        h = Slider.ROW_H * len(self.sliders) + 14
-        x0, y0 = self.screen.get_width() - w - 10, 38
-        panel = pygame.Surface((w, h), pygame.SRCALPHA)
-        panel.fill((0, 0, 0, 165))
-        self.screen.blit(panel, (x0, y0))
-        for i, s in enumerate(self.sliders):
-            s.layout(x0 + 12, y0 + 12 + i * Slider.ROW_H, gutter)
-            s.draw(self.screen, self.font)
+    def draw_titles(self):
+        """The menu names, left end of the top bar. Returns where they end."""
+        x, mouse = 0, pygame.mouse.get_pos()
+        self.titles = []
+        for title in self.menus:
+            rect = pygame.Rect(x, 0, self.font.size(title)[0] + 20, 28)
+            if title == self.open or rect.collidepoint(mouse):
+                pygame.draw.rect(self.screen, (50, 70, 100), rect)
+            self.text(title, x + 10, 6)
+            self.titles.append((rect, title))
+            x = rect.right
+        return x
+
+    def draw_menu(self):
+        """The open menu, laid out fresh each frame. Clicks are tested against
+        the rects it leaves in `self.rows`, so what is hit is what was drawn."""
+        self.rows = []
+        if self.open is None:
+            return
+        rows = self.menus[self.open]
+        # One gutter for all the sliders, so their tracks line up in a column.
+        gutter = max((r.gutter(self.font) for r in rows if isinstance(r, Slider)),
+                     default=0)
+
+        def width(r):
+            if isinstance(r, Slider):
+                return gutter + Slider.TRACK_W
+            if r is None:
+                return 0
+            return self.font.size(r.label)[0] + 32 + self.font.size(r.key or "")[0]
+
+        w = 24 + max(map(width, rows)) + 16
+        heights = [Slider.ROW_H if isinstance(r, Slider) else 22 if r else 9 for r in rows]
+        x = next(rect.x for rect, t in self.titles if t == self.open)
+        self.panel = pygame.Rect(x, 28, w, sum(heights) + 8)
+        pygame.draw.rect(self.screen, (30, 32, 40), self.panel)
+        pygame.draw.rect(self.screen, (70, 74, 84), self.panel, 1)
+        y, mouse = 32, pygame.mouse.get_pos()
+        for r, h in zip(rows, heights):
+            rect = pygame.Rect(x + 1, y, w - 2, h)
+            if isinstance(r, Slider):
+                r.layout(x + 24, y + 6, gutter)
+                r.draw(self.screen, self.font)
+            elif r is None:
+                pygame.draw.line(self.screen, (70, 74, 84), (x + 8, y + 4), (x + w - 8, y + 4))
+            else:
+                if r.action and rect.collidepoint(mouse):
+                    pygame.draw.rect(self.screen, (50, 70, 100), rect)
+                if r.checked and r.checked():
+                    pygame.draw.circle(self.screen, (150, 190, 230), (x + 12, rect.centery), 4)
+                self.text(r.label, x + 24, y + 3)
+                if r.key:
+                    self.text(r.key, x + w - 16 - self.font.size(r.key)[0], y + 3,
+                              (150, 155, 170))
+            self.rows.append((rect, r))
+            y += h
+
+    def row_at(self, pos):
+        """The open menu's row under `pos`. A slider is only hit on its track:
+        a click on its label would otherwise snap it to the bottom."""
+        for rect, r in self.rows:
+            if r.hit(pos) if isinstance(r, Slider) else r and rect.collidepoint(pos):
+                return r
 
     def wanted(self):
         """The config the sliders are currently asking for.
@@ -290,7 +377,7 @@ class Viewer:
         else:
             name = "-"
         pygame.draw.rect(self.screen, (26, 28, 34), (0, 0, self.screen.get_width(), 28))
-        x = 8
+        x = self.draw_titles() + 14
         x += self.text(f"[{self.layer + 1}] {name}", x, 4, (255, 226, 150), self.big) + 22
         x += self.text(f"seed {self.cfg.seed}  {self.cfg.width}x{self.cfg.height}"
                        f"  zoom {self.zoom:.2f}x", x, 6) + 22
@@ -310,25 +397,15 @@ class Viewer:
                           f"  bnd {d['dist_to_boundary']:.0f}px  rain {d['rain']:.2f}"
                           f"  {d['temp']:+.0f}C  flow {d['flow']:.0f}{extra}",
                           x, 6, (170, 210, 255))
-        self.draw_sliders()
+        # Bottom left, where no menu drops down over it mid-rebuild.
         if self.busy:
-            self.text(self.busy, 12, 40, (255, 200, 120), self.big)
-        if self.show_help:
-            y = self.screen.get_height() - 20 * len(HELP) - 12
-            # Sized to the longest line rather than a fixed width: at a fixed
-            # one, editing any help text runs it off the end of its backing.
-            wide = max(self.font.size(line)[0] for line in HELP) + 16
-            panel = pygame.Surface((wide, 20 * len(HELP) + 8), pygame.SRCALPHA)
-            panel.fill((0, 0, 0, 165))
-            self.screen.blit(panel, (8, y - 4))
-            for i, line in enumerate(HELP):
-                self.text(line, 16, y + 20 * i, (215, 215, 215))
+            self.text(self.busy, 12, self.screen.get_height() - 32, (255, 200, 120), self.big)
+        self.draw_menu()
 
     # ---- main loop --------------------------------------------------
     def run(self):
         clock = pygame.time.Clock()
         drag = None
-        rng = np.random.default_rng()
         while True:
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
@@ -336,10 +413,20 @@ class Viewer:
                 if e.type == pygame.VIDEORESIZE:
                     self.screen = pygame.display.set_mode(e.size, pygame.RESIZABLE)
                 if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-                    grabbed = next((s for s in self.sliders if s.hit(e.pos)), None)
-                    if grabbed:
-                        grabbed.grabbed = True
-                        grabbed.set_from(e.pos[0])
+                    title = next((t for rect, t in self.titles if rect.collidepoint(e.pos)), None)
+                    row = self.row_at(e.pos)
+                    if title:
+                        self.open = None if title == self.open else title
+                    elif isinstance(row, Slider):
+                        row.grabbed = True
+                        row.set_from(e.pos[0])
+                    elif row and row.action:
+                        self.open = None
+                        row.action()
+                    elif self.open:
+                        # A click off the menu closes it, and does only that.
+                        if not self.panel.collidepoint(e.pos):
+                            self.open = None
                     else:
                         drag = e.pos
                 if e.type == pygame.MOUSEBUTTONUP and e.button == 1:
@@ -355,10 +442,16 @@ class Viewer:
                     self.cam[1] -= (e.pos[1] - drag[1]) / self.zoom
                     drag = e.pos
                     self.clamp()
+                elif e.type == pygame.MOUSEMOTION and self.open:
+                    # With one menu open, sliding along the bar opens the next.
+                    self.open = next((t for rect, t in self.titles
+                                      if rect.collidepoint(e.pos)), self.open)
                 if e.type == pygame.MOUSEWHEEL:
                     self.zoom_at(1.16 ** e.y, pygame.mouse.get_pos())
                 if e.type == pygame.KEYDOWN:
-                    if e.key in (pygame.K_ESCAPE, pygame.K_q):
+                    if e.key == pygame.K_ESCAPE and self.open:
+                        self.open = None
+                    elif e.key in (pygame.K_ESCAPE, pygame.K_q):
                         return
                     if pygame.K_1 <= e.key <= pygame.K_9:
                         self.layer = e.key - pygame.K_1
@@ -372,21 +465,17 @@ class Viewer:
                     if e.key == pygame.K_LEFTBRACKET:
                         self.layer = (self.layer - 1) % len(render.LAYERS)
                     if e.key == pygame.K_r:
-                        self.regenerate(int(rng.integers(0, 10 ** 6)))
+                        self.new_world()
                     if e.key == pygame.K_t:
                         self.regenerate(self.cfg.seed)
                     if e.key == pygame.K_g:
                         self.arrows = not self.arrows
-                    if e.key == pygame.K_F1:
-                        self.show_help = not self.show_help
                     if e.key == pygame.K_z:
                         self.fit()
                     if e.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
-                        self.zoom_at(1.25, (self.screen.get_width() // 2,
-                                            self.screen.get_height() // 2))
-                    if e.key in (pygame.K_KP_MINUS,):
-                        self.zoom_at(0.8, (self.screen.get_width() // 2,
-                                           self.screen.get_height() // 2))
+                        self.zoom_center(1.25)
+                    if e.key == pygame.K_KP_MINUS:
+                        self.zoom_center(0.8)
                     if e.key == pygame.K_p:
                         self.save()
                     if e.key == pygame.K_e:

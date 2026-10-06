@@ -49,10 +49,15 @@ before use (`plate_warp`, `crust_warp`, `age_warp`).
 
 ## Viewer
 
+A menu bar along the top: File (save, export, quit), Edit (new world, rebuild,
+the sliders), View (plate arrows, zoom), Layer (every layer), Help (mouse
+controls). Each entry shows its shortcut key; the keys work with the menus shut.
+Esc closes an open menu before it quits.
+
 Left-drag or WASD/arrows to pan, wheel to zoom, `Z` to fit. Number keys pick a
 layer, `[` `]` cycle. `R` regenerates with a new seed, `T` with the same one,
 `G` overlays plate motion arrows, `P` saves the current layer, `E` exports the
-world for an engine, `F1` toggles help. `P` and `E` write to the same folder —
+world for an engine. `P` and `E` write to the same folder —
 one per world under `out/export/`, made on the first press of either — so the
 pictures and the data of a world stay together. `E` also saves the main view, to
 say which world the folder holds. Regenerating starts a new folder, so nothing
@@ -74,7 +79,7 @@ already draws that line better - and skip rivers and lakes, where a border
 reads as something built there. The key goes in whichever corner has the least
 land under it.
 
-Seven sliders top right. World: plate count (4-48), size (192-1024 wide, 4:3),
+Seven sliders in the Edit menu. World: plate count (4-48), size (192-1024 wide, 4:3),
 `land_fraction` as a percent, `margin_h` (0.00-0.40). Water: river count, lake
 count. Climate: `temp_offset`, -20 to +20 degrees.
 
