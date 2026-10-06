@@ -108,7 +108,7 @@ def overpaint_water(rgb, w):
     return rgb
 
 
-def water_map(w, shade=True):
+def water_map(w, shade=True, tint_mix=None):
     """The main view: relief with lakes at their own flat level and rivers by width.
 
     Lakes are shaded from the water surface, not the bed, so they read as flat
@@ -126,9 +126,12 @@ def water_map(w, shade=True):
     the ramp draws as one blue line through uniform green. At 1.0 they bury the
     hypsometric ramp and the layer stops being a relief map; at 0 they are off,
     which is what the `trees` layer is for.
+
+    `tint_mix` of 1 drops the height ramp from the land and leaves the biome
+    colour alone under the same shading, trees and water.
     """
     rgb = relief(w.height, shade, surface=w.surface, tint=biome_rgb(w),
-                 tint_mix=w.cfg.biome_tint)
+                 tint_mix=w.cfg.biome_tint if tint_mix is None else tint_mix)
     rgb = paint_trees(rgb, w.trees, w.height.shape, w.cfg.tree_relief)
     return np.clip(overpaint_water(rgb, w), 0, 255).astype(np.uint8)
 
@@ -588,6 +591,9 @@ LAYERS = [
     # the biomes layer with the answer beside it, so anyone who wants it is
     # already one bracket away on the layer it belongs next to.
     ("biome legend", legend_biome_map),
+    # The main view with what grows in place of how high, for reading the two
+    # side by side. Past the number keys with the other biome layers.
+    ("main view (biomes)", lambda w: water_map(w, tint_mix=1.0)),
     ("drainage", lambda w: flow(w.flow, w.height, w.cfg.river_threshold * w.height.size)),
     ("erosion delta", lambda w: erosion_diff(w.height_pre, w.height_eroded)),
     ("slope", lambda w: slope_map(w.height)),
