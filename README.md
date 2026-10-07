@@ -18,7 +18,7 @@ pip install numpy scipy pygame
 ## Run
 
 ```bash
-python main.py --seed 7 --size 640x448
+python main.py
 ```
 
 ```bash
@@ -29,7 +29,8 @@ python preview.py 7          # every layer to out/, export to out/export/seed7/
 python test_terrain.py       # invariant checks
 ```
 
-The viewer also takes `--windowed WxH` for the window size and `--plates N`.
+The viewer takes `--seed N` (default 7), `--size WxH` for the map (default
+640x448), `--windowed WxH` for the window and `--plates N`.
 
 ## Viewer
 
