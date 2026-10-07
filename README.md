@@ -131,3 +131,8 @@ The reasons behind each stage are in its module's docstrings.
 
 About 3 s at 640x448, 12-14 s at 1024x768, 27-43 s at 1920x1080 and a little
 over two minutes at 3840x2160. Times vary from run to run.
+
+## License
+
+MIT. Free to use, change and share, as long as you keep the credit. See
+[LICENSE](LICENSE).
