@@ -45,6 +45,7 @@ Every action is in the menu bar, with its key beside it.
 | `[` `]` | previous / next layer |
 | `R` | new world, new seed |
 | `T` | rebuild, same seed |
+| `N` | type a seed, `Enter` to build |
 | `G` | plate motion arrows |
 | `P` | save the current layer as a picture |
 | `E` | export for an engine |

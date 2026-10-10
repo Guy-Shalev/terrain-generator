@@ -127,6 +127,7 @@ class Viewer:
         self.rows = []         # (rect, row) of the open menu, laid out by draw
         self.panel = pygame.Rect(0, 0, 0, 0)
         self.rng = np.random.default_rng()
+        self.seed_text = None  # the seed being typed; None while the box is shut
         self.busy = ""
         self.world = None
         self.surfaces = {}
@@ -159,6 +160,7 @@ class Viewer:
             "Edit": [
                 Item("New world", "R", self.new_world),
                 Item("Rebuild, same seed", "T", lambda: self.regenerate(self.cfg.seed)),
+                Item("Enter seed...", "N", self.ask_seed),
                 None,
                 *self.sliders,
             ],
@@ -202,7 +204,25 @@ class Viewer:
         self.fit()
 
     def new_world(self):
-        self.regenerate(int(self.rng.integers(0, 10 ** 6)))
+        self.regenerate(int(self.rng.integers(0, 2 ** 32)))
+
+    def ask_seed(self):
+        """Open the seed box. Drawn in the window like the menus, so no
+        operating-system dialog frame; `type_seed` takes the keys meanwhile."""
+        self.seed_text = ""
+
+    def type_seed(self, e):
+        if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            text, self.seed_text = self.seed_text, None
+            if text:
+                self.regenerate(int(text))
+        elif e.key == pygame.K_ESCAPE:
+            self.seed_text = None
+        elif e.key == pygame.K_BACKSPACE:
+            self.seed_text = self.seed_text[:-1]
+        # Digits only, so there is never anything for int() to refuse.
+        elif e.unicode.isascii() and e.unicode.isdigit() and len(self.seed_text) < 10:
+            self.seed_text += e.unicode
 
     def surface(self, i):
         """Layers are rendered on demand and cached; some are not cheap."""
@@ -415,6 +435,15 @@ class Viewer:
         if self.busy:
             self.text(self.busy, 12, sh - 60, (255, 200, 120), self.big)
         self.draw_menu()
+        if self.seed_text is not None:
+            line, hint = f"seed {self.seed_text}_", "Enter to build, Esc to cancel"
+            box = pygame.Rect(0, 0, max(self.big.size(line)[0],
+                                        self.font.size(hint)[0]) + 28, 64)
+            box.center = self.screen.get_rect().center
+            pygame.draw.rect(self.screen, (30, 32, 40), box)
+            pygame.draw.rect(self.screen, (70, 74, 84), box, 1)
+            self.text(line, box.x + 14, box.y + 10, font=self.big)
+            self.text(hint, box.x + 14, box.y + 38, (150, 155, 170))
 
     # ---- main loop --------------------------------------------------
     def run(self):
@@ -424,6 +453,11 @@ class Viewer:
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
                     return
+                # While the seed box is open it has the keyboard: digits are
+                # layer keys and Esc quits otherwise.
+                if e.type == pygame.KEYDOWN and self.seed_text is not None:
+                    self.type_seed(e)
+                    continue
                 if e.type == pygame.VIDEORESIZE:
                     self.screen = pygame.display.set_mode(e.size, pygame.RESIZABLE)
                 if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
@@ -496,6 +530,8 @@ class Viewer:
                         self.export()
                     if e.key == pygame.K_i:
                         self.import_config()
+                    if e.key == pygame.K_n:
+                        self.ask_seed()
 
             keys = pygame.key.get_pressed()
             step = 12 / self.zoom
